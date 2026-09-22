@@ -104,8 +104,8 @@ def _potato_help(site=None):
     )
 reference.help_text=_potato_help
 
-def _potato_admin_help():
-    return _original_admin_help()+"\n管理员 本周总结 — 向通知群发布本周全员总结（仅私聊）\n管理员 历史总结 — 向通知群发布全员历史总结（仅私聊）"
+def _potato_admin_help(super_admin=False):
+    return _original_admin_help(super_admin)+"\n管理员 本周总结 — 向当前小组通知群发布本周总结\n管理员 历史总结 — 向当前小组通知群发布历史总结"
 reference.admin_help_text=_potato_admin_help
 
 def _potato_admin_group_list_text():
@@ -236,12 +236,12 @@ def _handle_potato_admin_summary(cid,uid,text):
     if not re.match(r"^管理员(?:\s|本周|历史)",text.strip()): return False
     normalized=re.sub(r"^管理员\s*", "", text.strip()).replace(" ","")
     if normalized not in {"本周总结","本周门训总结","历史总结","历史门训总结"}: return False
-    if not reference.is_admin(uid):
-        reference.send(bot,1,cid,"此指令只允许已验证管理员在私聊中使用。")
-        return True
     _,site=reference.resolve_message_site(bot,1,cid,uid)
     if not site:
         reference.send(bot,1,cid,"请先发送“网站”，再选择需要统计的网站。")
+        return True
+    if not reference.is_admin(uid,site):
+        reference.send(bot,1,cid,f"你没有 {site.name} 的管理权限。")
         return True
     try:
         message=_weekly_group_summary(site) if normalized in {"本周总结","本周门训总结"} else _history_group_summary(site)
