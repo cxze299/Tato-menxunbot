@@ -1,0 +1,18 @@
+{
+  "bot_token": "在这里填写从 BotFather 获取的 token",
+  "api_base": "https://api.rct2008.com:8443",
+  "timezone": "Asia/Shanghai",
+  "poll_interval": 5,
+  "sites": [
+    {
+      "id": "zk",
+      "name": "科大",
+      "url": "https://mouss.synology.me:1777/",
+      "chat_ids": [],
+      "devotion_time": "06:00",
+      "morning_time": "08:30",
+      "evening_time": "20:30",
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+.git
+reference/.git
+__pycache__/
+*.pyc
+*.log
+data/
+config.example.json
+README.md
+NAS部署.md

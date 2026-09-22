@@ -1,0 +1,23 @@
+name: potato-menxun-bot
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: potato-menxun-bot:local
+    container_name: potato-menxun-bot
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: Asia/Shanghai
+      WEBSITE_POLL_INTERVAL: "5"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    stop_grace_period: 20s

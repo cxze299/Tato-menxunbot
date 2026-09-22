@@ -1,0 +1,8 @@
+config.json
+state.json
+data/
+*.log
+__pycache__/
+*.pyc
+test_ssh*.py
+test_dsm_api*.py
