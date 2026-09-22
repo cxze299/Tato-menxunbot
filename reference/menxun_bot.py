@@ -1413,8 +1413,10 @@ def build_group_update(
     retro: bool = False,
     operation_time: str = "",
     event_time: str = "",
+    task_type: str = "",
 ) -> str:
-    display_type = {"每日灵修": "灵修", "周读物": "周读物", "周视频": "视频", "周背经": "背经"}[checkin_type]
+    legacy_types = {"每日灵修": "灵修", "周读物": "周读物", "周视频": "视频", "周背经": "背经"}
+    display_type = legacy_types.get(checkin_type, checkin_type)
     if cancelled:
         headline = f"↩️ {name}取消了打卡：{display_type}"
     else:
@@ -1423,6 +1425,12 @@ def build_group_update(
         headline += f"（补签 {logical_date}）"
     if operation_time:
         headline += f"\n操作时间：{operation_time}"
+    if checkin_type not in legacy_types:
+        if cancelled:
+            return headline
+        fallback_time = event_time or now(site).strftime("%m-%d %H:%M")
+        scope = logical_date if task_type.startswith("daily_") else "本周"
+        return headline + f"\n\n{scope} · 本次记录\n1. {fallback_time}  {name}"
     try:
         title, rows = checkin_timeline(
             site,
@@ -1583,9 +1591,10 @@ def poll_bot_api_events(bot, accid: int, site: SiteConfig) -> int:
             continue
         name = str(event.get("name") or "").strip()
         checkin_type = str(event.get("type") or "").strip()
+        task_type = str(event.get("task_type") or "").strip()
         logical_date = str(event.get("logical_date") or "").strip()
         action = str(event.get("action") or "checkin")
-        if not name or checkin_type not in {"每日灵修", "周读物", "周视频", "周背经"} or not logical_date:
+        if not name or not checkin_type or not logical_date:
             continue
         recent_key = announcement_key(site, name, checkin_type, logical_date, "cancel" if action == "cancel" else "checkin")
         if time.time() - float(state["recent_announcements"].get(recent_key, 0) or 0) < 180:
@@ -1606,6 +1615,7 @@ def poll_bot_api_events(bot, accid: int, site: SiteConfig) -> int:
             retro=bool(event.get("is_retro")),
             operation_time=operation_time if cancelled else "",
             event_time=event_time,
+            task_type=task_type,
         )
         broadcast_group_update(bot, accid, site, message)
         delivered += 1

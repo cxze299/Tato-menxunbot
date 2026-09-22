@@ -221,6 +221,22 @@ class MenxunBotTests(unittest.TestCase):
         ])
         self.assertEqual(build.call_args_list[1].kwargs["operation_time"], "2026-08-22 20:01:00")
 
+    def test_custom_website_button_is_not_filtered_and_uses_live_label(self):
+        api_site = bot.SiteConfig(
+            site_id="cedar-test", name="香柏木门训 / 测试组",
+            url="https://example.test/api/bot/groups/test", chat_ids=frozenset({101}), api_key="secret",
+        )
+        temporary_state = {"website_event_cursors": {api_site.site_id: "old,0"}, "recent_announcements": {}}
+        payload = {"cursor": "new,1", "events": [{
+            "action": "checkin", "name": "甲", "type": "生命操练", "task_type": "weekly_checkin",
+            "logical_date": "2026-09-22", "changed_at": "2026-09-22T12:00:00Z", "is_retro": False,
+        }]}
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", return_value=payload), patch.object(bot, "broadcast_group_update") as broadcast:
+            self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 1)
+        message = broadcast.call_args.args[3]
+        self.assertIn("甲打卡了：生命操练", message)
+        self.assertIn("本周 · 本次记录", message)
+
     def test_cancel_group_update_includes_operation_time(self):
         with patch.object(bot, "checkin_timeline", return_value=("当天灵修（按时间）", [])):
             text = bot.build_group_update(
