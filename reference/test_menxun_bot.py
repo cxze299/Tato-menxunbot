@@ -508,7 +508,7 @@ class MenxunBotTests(unittest.TestCase):
             verify.assert_called_once()
             send.reset_mock()
             bot.handle_admin_command(fake_bot, 1, 101, 88, True, self.site, "管理员验证 Strong-Key-2026")
-            self.assertIn("只能私聊", send.call_args.args[3])
+            send.assert_not_called()
 
     def test_only_bound_admin_can_broadcast(self):
         fake_bot = SimpleNamespace()
@@ -521,7 +521,7 @@ class MenxunBotTests(unittest.TestCase):
             bot.handle_admin_command(fake_bot, 1, 900, 77, False, self.site, "管理员 广播 测试公告")
             broadcast.assert_called_once_with(fake_bot, 1, self.site, "📢 测试网站 · 管理员公告\n\n测试公告")
 
-    def test_bound_admin_can_publish_daily_devotion_from_group(self):
+    def test_group_admin_commands_are_silent_in_groups(self):
         fake_bot = SimpleNamespace()
         temporary_state = {"bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {
             "77": {"verified_at": "2026-08-21T10:00:00+08:00"}
@@ -531,7 +531,30 @@ class MenxunBotTests(unittest.TestCase):
         ) as publish, patch.object(bot, "send"):
             handled = bot.handle_admin_command(fake_bot, 1, 101, 77, True, self.site, "管理员 发布灵修")
             self.assertTrue(handled)
-            publish.assert_called_once_with(fake_bot, 1, self.site)
+            publish.assert_not_called()
+
+    def test_group_admin_is_restricted_to_assigned_site(self):
+        other_site = bot.SiteConfig(site_id="other", name="其他组", url="https://other.test", chat_ids=frozenset({202}))
+        temporary_state = {
+            "admins": {}, "super_admins": {},
+            "group_admins": {self.site.site_id: {"88": {"assigned_at": "2026-09-22T10:00:00+08:00"}}},
+        }
+        fake_bot = SimpleNamespace()
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "send") as send, patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
+            bot.handle_admin_command(fake_bot, 1, 900, 88, False, self.site, "管理员 广播 本组公告")
+            broadcast.assert_called_once()
+            broadcast.reset_mock()
+            bot.handle_admin_command(fake_bot, 1, 900, 88, False, other_site, "管理员 广播 越权公告")
+            broadcast.assert_not_called()
+            self.assertIn("没有 其他组 的管理权限", send.call_args.args[3])
+
+    def test_super_admin_can_assign_group_admin(self):
+        temporary_state = {"admins": {"77": {}}, "super_admins": {"77": {}}, "group_admins": {}}
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "SITE_BY_ID", {self.site.site_id: self.site}), patch.object(bot, "SITES", (self.site,)), patch.object(bot, "save_state"), patch.object(bot, "send") as send:
+            handled = bot.handle_admin_command(SimpleNamespace(), 1, 900, 77, False, self.site, "管理员 添加小组管理员 test 88")
+        self.assertTrue(handled)
+        self.assertIn("88", temporary_state["group_admins"]["test"])
+        self.assertIn("已授权", send.call_args.args[3])
 
     def test_manual_devotion_publish_marks_today_so_scheduler_skips_it(self):
         temporary_state = {"reminded": {}}

@@ -201,6 +201,8 @@ def load_state() -> dict:
     loaded.setdefault("bindings", {})
     loaded.setdefault("active_sites", {})
     loaded.setdefault("admins", {})
+    loaded.setdefault("super_admins", {})
+    loaded.setdefault("group_admins", {})
     loaded.setdefault("welcomed", {})
     loaded.setdefault("website_records", {})
     loaded.setdefault("recent_announcements", {})
@@ -209,6 +211,12 @@ def load_state() -> dict:
     loaded.setdefault("website_event_cursors", {})
     if not isinstance(loaded["admins"], dict):
         loaded["admins"] = {}
+    if not isinstance(loaded["super_admins"], dict):
+        loaded["super_admins"] = {}
+    if not loaded["super_admins"]:
+        loaded["super_admins"] = dict(loaded["admins"])
+    if not isinstance(loaded["group_admins"], dict):
+        loaded["group_admins"] = {}
     if not isinstance(loaded["welcomed"], dict):
         loaded["welcomed"] = {}
     if not isinstance(loaded["website_records"], dict):
@@ -246,19 +254,52 @@ def write_health(status: str = "running") -> None:
     temporary.replace(HEALTH_FILE)
 
 
-def is_admin(member_id: int) -> bool:
-    return str(member_id) in state["admins"]
+def is_super_admin(member_id: int) -> bool:
+    records = state.get("super_admins") or state.get("admins") or {}
+    return str(member_id) in records
+
+
+def group_admin_site_ids(member_id: int) -> set[str]:
+    member_key = str(member_id)
+    return {
+        site_id for site_id, records in (state.get("group_admins") or {}).items()
+        if isinstance(records, dict) and member_key in records
+    }
+
+
+def is_group_admin(member_id: int, site: SiteConfig | None = None) -> bool:
+    site_ids = group_admin_site_ids(member_id)
+    return bool(site_ids) if site is None else site.site_id in site_ids
+
+
+def is_admin(member_id: int, site: SiteConfig | None = None) -> bool:
+    return is_super_admin(member_id) or is_group_admin(member_id, site)
 
 
 def bind_admin(member_id: int) -> None:
     with state_lock:
-        state["admins"][str(member_id)] = {"verified_at": datetime.now().astimezone().isoformat()}
+        record = {"verified_at": datetime.now().astimezone().isoformat()}
+        state.setdefault("super_admins", {})[str(member_id)] = record
+        state.setdefault("admins", {})[str(member_id)] = record
         save_state()
 
 
 def unbind_admin(member_id: int) -> None:
     with state_lock:
+        state.setdefault("super_admins", {}).pop(str(member_id), None)
         state["admins"].pop(str(member_id), None)
+        save_state()
+
+
+def set_group_admin(member_id: int, site: SiteConfig, enabled: bool) -> None:
+    with state_lock:
+        records = state.setdefault("group_admins", {}).setdefault(site.site_id, {})
+        if enabled:
+            records[str(member_id)] = {"assigned_at": datetime.now().astimezone().isoformat()}
+        else:
+            records.pop(str(member_id), None)
+            if not records:
+                state["group_admins"].pop(site.site_id, None)
         save_state()
 
 
@@ -1620,24 +1661,47 @@ def announce_change(
         send(bot, accid, origin_chat_id, message)
 
 
-def admin_help_text() -> str:
-    return "\n".join([
-        f"{BOT_NAME} · 管理员指令",
+def admin_help_text(super_admin: bool = False) -> str:
+    lines = [
+        f"{BOT_NAME} · {'超级管理员' if super_admin else '小组管理员'}指令",
         "",
-        "管理员验证 密钥 — 首次绑定（仅私聊）",
+        "管理员验证 密钥 — 验证为超级管理员（仅私聊）",
         "管理员状态 — 查看管理员身份",
-        "管理员解除 — 解除自己的管理员身份",
-        "",
-        "管理员 网站状态 — 检查所有网站",
         "管理员 成员列表 — 查看当前网站成员",
-        "管理员 群列表 — 查看网站与群 ID",
-        "管理员 绑定群 网站 群ID — 绑定通知群（仅私聊）",
         "管理员 设置加入日期 网站 姓名 日期 — 修正统计起点（仅私聊）",
         "管理员 广播 内容 — 广播到当前网站群聊",
         "管理员 发布灵修 — 将当天灵修内容发到群聊",
         "管理员 立即提醒 早间 — 立即发送早间提醒",
         "管理员 立即提醒 晚间 — 立即发送晚间提醒",
-    ])
+    ]
+    if super_admin:
+        lines.extend([
+            "",
+            "超级管理员专属",
+            "管理员 网站状态 — 检查所有网站",
+            "管理员 群列表 — 查看网站与群 ID",
+            "管理员 绑定群 网站 群ID — 绑定通知群",
+            "管理员 小组管理员列表 — 查看授权",
+            "管理员 添加小组管理员 网站 用户ID — 授权",
+            "管理员 删除小组管理员 网站 用户ID — 取消授权",
+            "管理员解除 — 解除自己的超级管理员身份",
+        ])
+    else:
+        lines.extend(["", "小组管理员只能操作获授权的小组；发送“管理员状态”可查看授权范围。"])
+    return "\n".join(lines)
+
+
+def group_admin_list_text() -> str:
+    lines = ["🛡️ 小组管理员授权"]
+    configured = False
+    for configured_site in SITES:
+        member_ids = sorted((state.get("group_admins") or {}).get(configured_site.site_id, {}))
+        if member_ids:
+            configured = True
+            lines.append(f"{configured_site.name}：{'、'.join(member_ids)}")
+    if not configured:
+        lines.append("暂未设置小组管理员。")
+    return "\n".join(lines)
 
 
 def admin_group_list_text() -> str:
@@ -1759,23 +1823,28 @@ def handle_admin_command(
     """处理中文管理员指令；返回是否已识别为管理员命令。"""
     if not re.match(r"^管理员", command_text.strip(), flags=re.IGNORECASE):
         return False
+    # 群聊只承载机器人通知，所有管理操作统一在私聊完成。
+    if is_group:
+        return True
     remainder = re.sub(r"^管理员\s*", "", command_text.strip(), count=1, flags=re.IGNORECASE)
     normalized = remainder.rstrip("！!。.").strip().lower()
 
     if normalized in {"", "帮助", "菜单"}:
-        send(bot, accid, chat_id, admin_help_text())
+        send(bot, accid, chat_id, admin_help_text(is_super_admin(member_id)))
         return True
     if normalized == "状态":
         key_status = "已设置" if load_key_record(ADMIN_KEY_FILE) else "未设置"
-        identity = "已绑定管理员" if is_admin(member_id) else "普通用户"
-        send(bot, accid, chat_id, f"🛡️ 管理员状态\n身份：{identity}\n验证密钥：{key_status}")
+        if is_super_admin(member_id):
+            identity, scope = "超级管理员", "全部网站和小组"
+        else:
+            managed = [SITE_BY_ID[site_id].name for site_id in sorted(group_admin_site_ids(member_id)) if site_id in SITE_BY_ID]
+            identity = "小组管理员" if managed else "普通用户"
+            scope = "、".join(managed) if managed else "无"
+        send(bot, accid, chat_id, f"🛡️ 管理员状态\n用户 ID：{member_id}\n身份：{identity}\n管理范围：{scope}\n超级管理员密钥：{key_status}")
         return True
     if normalized.startswith("验证"):
-        if is_group:
-            send(bot, accid, chat_id, "管理员验证只能私聊机器人进行，避免密钥泄露。")
-            return True
-        if is_admin(member_id):
-            send(bot, accid, chat_id, "你已经绑定为管理员，无需再次验证。")
+        if is_super_admin(member_id):
+            send(bot, accid, chat_id, "你已经是超级管理员，无需再次验证。")
             return True
         secret = re.sub(r"^验证\s*[:：]?\s*", "", remainder, count=1, flags=re.IGNORECASE)
         if not secret:
@@ -1784,32 +1853,58 @@ def handle_admin_command(
         verified, result = verify_admin_attempt(member_id, secret)
         if verified:
             bind_admin(member_id)
-            send(bot, accid, chat_id, "✅ 管理员验证成功，当前用户已永久绑定。以后无需再次输入密钥。\n发送“管理员帮助”查看指令。")
+            send(bot, accid, chat_id, "✅ 超级管理员验证成功，当前用户已永久绑定。以后无需再次输入密钥。\n发送“管理员帮助”查看指令。")
         else:
             send(bot, accid, chat_id, f"❌ {result}")
         return True
     if normalized == "解除":
-        if not is_admin(member_id):
-            send(bot, accid, chat_id, "当前用户不是管理员。")
-        elif is_group:
-            send(bot, accid, chat_id, "为避免误操作，请私聊发送“管理员解除”。")
+        if not is_super_admin(member_id):
+            send(bot, accid, chat_id, "当前用户不是超级管理员；小组管理员权限需由超级管理员取消。")
         else:
             unbind_admin(member_id)
-            send(bot, accid, chat_id, "已解除当前用户的管理员身份。如需恢复，必须重新验证密钥。")
+            send(bot, accid, chat_id, "已解除当前用户的超级管理员身份。如需恢复，必须重新验证密钥。")
         return True
 
     if not is_admin(member_id):
-        send(bot, accid, chat_id, "此指令仅限管理员。请私聊发送“管理员验证 你的密钥”。")
+        send(bot, accid, chat_id, "此指令仅限管理员。请让超级管理员授权，或使用超级管理员密钥验证。")
         return True
     if normalized == "网站状态":
-        send(bot, accid, chat_id, admin_site_status_text())
+        if not is_super_admin(member_id):
+            send(bot, accid, chat_id, "此指令仅限超级管理员。小组管理员可查看当前小组的成员列表和总结。")
+        else:
+            send(bot, accid, chat_id, admin_site_status_text())
         return True
     if normalized == "群列表":
-        send(bot, accid, chat_id, admin_group_list_text())
+        if not is_super_admin(member_id):
+            send(bot, accid, chat_id, "此指令仅限超级管理员。")
+        else:
+            send(bot, accid, chat_id, admin_group_list_text())
+        return True
+    if normalized == "小组管理员列表":
+        send(bot, accid, chat_id, group_admin_list_text() if is_super_admin(member_id) else "此指令仅限超级管理员。")
+        return True
+    if normalized.startswith(("添加小组管理员", "删除小组管理员")):
+        if not is_super_admin(member_id):
+            send(bot, accid, chat_id, "此指令仅限超级管理员。")
+            return True
+        enabled = normalized.startswith("添加小组管理员")
+        verb = "添加小组管理员" if enabled else "删除小组管理员"
+        value = re.sub(rf"^{verb}\s*[:：]?\s*", "", remainder, count=1, flags=re.IGNORECASE).strip()
+        parts = value.rsplit(maxsplit=1)
+        selected_site = find_site(parts[0]) if len(parts) == 2 else None
+        if not selected_site or not parts[1].isdigit():
+            send(bot, accid, chat_id, f"请输入：管理员 {verb} 网站 用户ID\n用户可发送“管理员状态”查看自己的用户 ID。")
+            return True
+        target_id = int(parts[1])
+        if is_super_admin(target_id) and not enabled:
+            send(bot, accid, chat_id, "该用户是超级管理员；请由其本人发送“管理员解除”。")
+            return True
+        set_group_admin(target_id, selected_site, enabled)
+        send(bot, accid, chat_id, f"✅ 已{'授权' if enabled else '取消授权'}：用户 {target_id} / {selected_site.name}")
         return True
     if normalized.startswith("绑定群"):
-        if is_group:
-            send(bot, accid, chat_id, "绑定群 ID 只能私聊机器人操作。")
+        if not is_super_admin(member_id):
+            send(bot, accid, chat_id, "绑定通知群仅限超级管理员。")
             return True
         value = re.sub(r"^绑定群\s*[:：]?\s*", "", remainder, count=1, flags=re.IGNORECASE).strip()
         if not value:
@@ -1857,6 +1952,9 @@ def handle_admin_command(
         if not selected_site or not target_name or not join_day:
             send(bot, accid, chat_id, "请输入：管理员 设置加入日期 网站 姓名 YYYY-MM-DD\n例如：管理员 设置加入日期 科大 张三 2026-01-01")
             return True
+        if not is_super_admin(member_id) and not is_group_admin(member_id, selected_site):
+            send(bot, accid, chat_id, f"你没有 {selected_site.name} 的管理权限。")
+            return True
         current_day = now(selected_site).date()
         if join_day < date(2000, 1, 1) or join_day > current_day:
             send(bot, accid, chat_id, f"加入日期必须在 2000-01-01 至 {current_day.isoformat()} 之间。")
@@ -1874,12 +1972,17 @@ def handle_admin_command(
     if normalized == "成员列表":
         if not site:
             send(bot, accid, chat_id, "请先发送“网站”，再切换到需要查看的网站。")
+        elif not is_super_admin(member_id) and not is_group_admin(member_id, site):
+            send(bot, accid, chat_id, f"你没有 {site.name} 的管理权限。")
         else:
             send(bot, accid, chat_id, admin_member_list_text(site))
         return True
     if normalized.startswith("广播"):
         if not site:
             send(bot, accid, chat_id, "请先选择要广播的网站。")
+            return True
+        if not is_super_admin(member_id) and not is_group_admin(member_id, site):
+            send(bot, accid, chat_id, f"你没有 {site.name} 的管理权限。")
             return True
         content = re.sub(r"^广播\s*[:：]?\s*", "", remainder, count=1, flags=re.IGNORECASE)
         if not content:
@@ -1893,6 +1996,9 @@ def handle_admin_command(
         if not site:
             send(bot, accid, chat_id, "请先选择要发布灵修的网站。")
             return True
+        if not is_super_admin(member_id) and not is_group_admin(member_id, site):
+            send(bot, accid, chat_id, f"你没有 {site.name} 的管理权限。")
+            return True
         delivered = publish_daily_devotion(bot, accid, site)
         if is_group and chat_id in site.chat_ids:
             send(bot, accid, chat_id, f"✅ 今日灵修已发布。")
@@ -1903,6 +2009,9 @@ def handle_admin_command(
         if not site:
             send(bot, accid, chat_id, "请先选择要提醒的网站。")
             return True
+        if not is_super_admin(member_id) and not is_group_admin(member_id, site):
+            send(bot, accid, chat_id, f"你没有 {site.name} 的管理权限。")
+            return True
         value = re.sub(r"^立即提醒\s*", "", normalized)
         reminder_kind = "morning" if value in {"早间", "早上", "早晨"} else "evening" if value in {"晚间", "晚上"} else ""
         if not reminder_kind:
@@ -1912,7 +2021,7 @@ def handle_admin_command(
         send(bot, accid, chat_id, f"✅ {('早间' if reminder_kind == 'morning' else '晚间')}提醒已发送到 {delivered} 个群。")
         return True
 
-    send(bot, accid, chat_id, "没有识别该管理员指令。\n\n" + admin_help_text())
+    send(bot, accid, chat_id, "没有识别该管理员指令。\n\n" + admin_help_text(is_super_admin(member_id)))
     return True
 
 
