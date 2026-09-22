@@ -189,6 +189,38 @@ class MenxunBotTests(unittest.TestCase):
         self.assertIn("乙|每日灵修|cancelled=True|time=2026-08-22 19:45:12", messages)
         self.assertIn("乙|周视频|cancelled=True|time=2026-08-22 19:45:12", messages)
 
+    def test_bot_api_event_poll_saves_cursor_and_emits_checkin_and_cancel(self):
+        api_site = bot.SiteConfig(
+            site_id="cedar-test",
+            name="香柏木门训 / 测试组",
+            url="https://example.test/api/bot/groups/test",
+            chat_ids=frozenset({101}),
+            api_key="secret",
+        )
+        temporary_state = {
+            "website_event_cursors": {}, "recent_announcements": {}, "bindings": {},
+            "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {},
+        }
+        initial = {"cursor": "2026-08-22T00:00:00Z,0", "events": []}
+        updated = {
+            "cursor": "2026-08-22T12:01:00Z,8",
+            "events": [
+                {"action": "checkin", "name": "甲", "type": "周视频", "logical_date": "2026-08-20", "changed_at": "2026-08-22T12:00:00Z", "is_retro": True},
+                {"action": "cancel", "name": "乙", "type": "每日灵修", "logical_date": "2026-08-22", "changed_at": "2026-08-22T12:01:00Z", "is_retro": False},
+            ],
+        }
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", side_effect=[initial, updated]) as fetch, patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|retro={kwargs.get('retro')}|cancelled={kwargs.get('cancelled')}") as build, patch.object(bot, "broadcast_group_update") as broadcast:
+            self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 0)
+            self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 2)
+        self.assertEqual(fetch.call_args_list[0].args[1], "/api/events")
+        self.assertIn("cursor=2026-08-22T00%3A00%3A00Z%2C0", fetch.call_args_list[1].args[1])
+        self.assertEqual(temporary_state["website_event_cursors"][api_site.site_id], updated["cursor"])
+        self.assertEqual([call.args[3] for call in broadcast.call_args_list], [
+            "甲|周视频|retro=True|cancelled=False",
+            "乙|每日灵修|retro=False|cancelled=True",
+        ])
+        self.assertEqual(build.call_args_list[1].kwargs["operation_time"], "2026-08-22 20:01:00")
+
     def test_cancel_group_update_includes_operation_time(self):
         with patch.object(bot, "checkin_timeline", return_value=("当天灵修（按时间）", [])):
             text = bot.build_group_update(

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -206,6 +206,7 @@ def load_state() -> dict:
     loaded.setdefault("recent_announcements", {})
     loaded.setdefault("warm_reminders", {})
     loaded.setdefault("member_join_dates", {})
+    loaded.setdefault("website_event_cursors", {})
     if not isinstance(loaded["admins"], dict):
         loaded["admins"] = {}
     if not isinstance(loaded["welcomed"], dict):
@@ -218,6 +219,8 @@ def load_state() -> dict:
         loaded["warm_reminders"] = {}
     if not isinstance(loaded["member_join_dates"], dict):
         loaded["member_join_dates"] = {}
+    if not isinstance(loaded["website_event_cursors"], dict):
+        loaded["website_event_cursors"] = {}
     return loaded
 
 
@@ -1449,6 +1452,8 @@ def remember_announced_change(
 
 def poll_website_notifications(bot, accid: int, site: SiteConfig) -> int:
     """检测网站新增和删除记录；首次运行仅建立基线。"""
+    if "/api/bot/groups/" in site.url:
+        return poll_bot_api_events(bot, accid, site)
     website_state, _ = website_snapshot(site)
     records = [record for record in (website_state.get("records") or []) if isinstance(record, dict)]
     current = {record_fingerprint(record): record for record in records}
@@ -1523,6 +1528,51 @@ def poll_website_notifications(bot, accid: int, site: SiteConfig) -> int:
         }
         save_state()
     return delivered_events
+
+
+def poll_bot_api_events(bot, accid: int, site: SiteConfig) -> int:
+    """读取香柏木 Bot API 增量事件，避免反复下载全部历史记录。"""
+    cursor = str(state["website_event_cursors"].get(site.site_id) or "")
+    path = "/api/events" + (f"?cursor={quote(cursor, safe='')}" if cursor else "")
+    payload = fetch_json(site, path)
+    events = payload.get("events") or []
+    delivered = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("name") or "").strip()
+        checkin_type = str(event.get("type") or "").strip()
+        logical_date = str(event.get("logical_date") or "").strip()
+        action = str(event.get("action") or "checkin")
+        if not name or checkin_type not in {"每日灵修", "周读物", "周视频", "周背经"} or not logical_date:
+            continue
+        recent_key = announcement_key(site, name, checkin_type, logical_date, "cancel" if action == "cancel" else "checkin")
+        if time.time() - float(state["recent_announcements"].get(recent_key, 0) or 0) < 180:
+            continue
+        changed_at = str(event.get("changed_at") or "")
+        operation_time = ""
+        event_time = ""
+        try:
+            parsed = datetime.fromisoformat(changed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(site.timezone))
+            operation_time = parsed.strftime("%Y-%m-%d %H:%M:%S")
+            event_time = parsed.strftime("%m-%d %H:%M")
+        except ValueError:
+            pass
+        cancelled = action == "cancel"
+        message = build_group_update(
+            site, name, checkin_type, logical_date,
+            cancelled=cancelled,
+            retro=bool(event.get("is_retro")),
+            operation_time=operation_time if cancelled else "",
+            event_time=event_time,
+        )
+        broadcast_group_update(bot, accid, site, message)
+        delivered += 1
+    next_cursor = str(payload.get("cursor") or cursor)
+    with state_lock:
+        state["website_event_cursors"][site.site_id] = next_cursor
+        save_state()
+    return delivered
 
 
 def broadcast_group_update(bot, accid: int, site: SiteConfig, message: str) -> int:
