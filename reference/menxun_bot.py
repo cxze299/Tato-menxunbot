@@ -1661,33 +1661,42 @@ def announce_change(
         send(bot, accid, origin_chat_id, message)
 
 
-def admin_help_text(super_admin: bool = False) -> str:
-    lines = [
-        f"{BOT_NAME} · {'超级管理员' if super_admin else '小组管理员'}指令",
-        "",
-        "管理员验证 密钥 — 验证为超级管理员（仅私聊）",
-        "管理员状态 — 查看管理员身份",
-        "管理员 成员列表 — 查看当前网站成员",
-        "管理员 设置加入日期 网站 姓名 日期 — 修正统计起点（仅私聊）",
-        "管理员 广播 内容 — 广播到当前网站群聊",
-        "管理员 发布灵修 — 将当天灵修内容发到群聊",
-        "管理员 立即提醒 早间 — 立即发送早间提醒",
-        "管理员 立即提醒 晚间 — 立即发送晚间提醒",
-    ]
+def admin_help_text(super_admin: bool = False, group_admin: bool = False) -> str:
+    if not super_admin and not group_admin:
+        return "\n".join([
+            f"{BOT_NAME} · 管理员入口",
+            "",
+            "管理员状态 — 查看用户 ID 和当前权限",
+            "管理员验证 密钥 — 验证为超级管理员",
+            "",
+            "小组管理员请联系超级管理员授权。",
+            "所有管理指令仅限私聊。",
+        ])
+    lines = [f"{BOT_NAME} · {'超级管理员' if super_admin else '小组管理员'}", ""]
     if super_admin:
         lines.extend([
-            "",
-            "超级管理员专属",
+            "【全局管理】",
             "管理员 网站状态 — 检查所有网站",
             "管理员 群列表 — 查看网站与群 ID",
             "管理员 绑定群 网站 群ID — 绑定通知群",
+            "",
+            "【权限管理】",
             "管理员 小组管理员列表 — 查看授权",
             "管理员 添加小组管理员 网站 用户ID — 授权",
             "管理员 删除小组管理员 网站 用户ID — 取消授权",
-            "管理员解除 — 解除自己的超级管理员身份",
         ])
-    else:
-        lines.extend(["", "小组管理员只能操作获授权的小组；发送“管理员状态”可查看授权范围。"])
+    lines.extend([
+        "",
+        "【小组操作】",
+        "管理员 成员列表 — 查看成员",
+        "管理员 设置加入日期 姓名 日期 — 修改统计起点",
+        "管理员 广播 内容 — 发送公告",
+        "管理员 发布灵修 — 发布今日灵修",
+        "管理员 立即提醒 早间/晚间 — 发送提醒",
+        "",
+        "管理员状态 — 查看身份和管理范围",
+        "所有管理指令仅限私聊。",
+    ])
     return "\n".join(lines)
 
 
@@ -1830,7 +1839,7 @@ def handle_admin_command(
     normalized = remainder.rstrip("！!。.").strip().lower()
 
     if normalized in {"", "帮助", "菜单"}:
-        send(bot, accid, chat_id, admin_help_text(is_super_admin(member_id)))
+        send(bot, accid, chat_id, admin_help_text(is_super_admin(member_id), is_group_admin(member_id)))
         return True
     if normalized == "状态":
         key_status = "已设置" if load_key_record(ADMIN_KEY_FILE) else "未设置"
@@ -2021,7 +2030,7 @@ def handle_admin_command(
         send(bot, accid, chat_id, f"✅ {('早间' if reminder_kind == 'morning' else '晚间')}提醒已发送到 {delivered} 个群。")
         return True
 
-    send(bot, accid, chat_id, "没有识别该管理员指令。\n\n" + admin_help_text(is_super_admin(member_id)))
+    send(bot, accid, chat_id, "没有识别该管理员指令。\n\n" + admin_help_text(is_super_admin(member_id), is_group_admin(member_id)))
     return True
 
 

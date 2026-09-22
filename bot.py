@@ -104,8 +104,10 @@ def _potato_help(site=None):
     )
 reference.help_text=_potato_help
 
-def _potato_admin_help(super_admin=False):
-    return _original_admin_help(super_admin)+"\n管理员 本周总结 — 向当前小组通知群发布本周总结\n管理员 历史总结 — 向当前小组通知群发布历史总结"
+def _potato_admin_help(super_admin=False, group_admin=False):
+    base=_original_admin_help(super_admin,group_admin)
+    if not super_admin and not group_admin: return base
+    return base+"\n\n【总结推送】\n管理员 本周总结 — 发布本周总结\n管理员 历史总结 — 发布历史总结"
 reference.admin_help_text=_potato_admin_help
 
 def _potato_admin_group_list_text():

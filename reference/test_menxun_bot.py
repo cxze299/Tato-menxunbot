@@ -556,6 +556,17 @@ class MenxunBotTests(unittest.TestCase):
         self.assertIn("88", temporary_state["group_admins"]["test"])
         self.assertIn("已授权", send.call_args.args[3])
 
+    def test_admin_help_is_concise_and_split_by_role(self):
+        ordinary = bot.admin_help_text()
+        group = bot.admin_help_text(group_admin=True)
+        super_admin = bot.admin_help_text(super_admin=True)
+        self.assertIn("管理员入口", ordinary)
+        self.assertNotIn("【小组操作】", ordinary)
+        self.assertIn("【小组操作】", group)
+        self.assertNotIn("【全局管理】", group)
+        self.assertIn("【全局管理】", super_admin)
+        self.assertIn("【权限管理】", super_admin)
+
     def test_manual_devotion_publish_marks_today_so_scheduler_skips_it(self):
         temporary_state = {"reminded": {}}
         fixed_now = datetime(2026, 8, 25, 5, 30)
