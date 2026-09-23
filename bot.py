@@ -65,7 +65,8 @@ def potato_api(method,params=None):
                 req=Request(f"{API}/{method}"+("?"+query if query else ""),headers={"Accept":"application/json","Connection":"close"})
             else:
                 req=Request(f"{API}/{method}",data=json.dumps(params,ensure_ascii=False).encode(),headers={"Content-Type":"application/json; charset=utf-8","Connection":"close"})
-            with urlopen(req,timeout=40) as response:
+            request_timeout = 6 if method == "getUpdates" else 20
+            with urlopen(req,timeout=request_timeout) as response:
                 result=json.loads(response.read().decode("utf-8"))
             if result.get("ok"): return result.get("result")
             last_error=RuntimeError(result.get("result") or result.get("description") or "Potato API 请求失败")
@@ -293,7 +294,8 @@ def main():
     while True:
         try:
             # Potato 服务端偶尔会关闭空闲长轮询连接；短轮询更稳定，断开后自动续拉。
-            for update in potato_api("getUpdates",{"offset":offset,"timeout":5}) or []:
+            # 短轮询让新消息尽快返回；消息本身交给线程池处理，不阻塞下一轮拉取。
+            for update in potato_api("getUpdates",{"offset":offset,"timeout":1}) or []:
                 offset=max(offset,int(update["update_id"])+1); dispatch_pool.submit(dispatch_ordered,update)
         except KeyboardInterrupt:return
         except (RemoteDisconnected, TimeoutError, URLError, ConnectionError) as error:
