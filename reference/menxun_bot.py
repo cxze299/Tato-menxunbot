@@ -334,12 +334,16 @@ def safe_log_text(raw_text: str) -> str:
 
 
 def send(bot, accid: int, chat_id: int, text: str) -> None:
-    if "**" not in text:
+    reader_links = list(re.finditer(r"\[([^\]\n]+)\]\((https://[^\s)]+\?reader_source=[^\s)]+)\)", text))
+    if "**" not in text and not reader_links:
         bot.rpc.send_msg(accid, chat_id, MessageData(text=text))
         return
     plain_text = text.replace("**", "")
     escaped = html_lib.escape(text)
     formatted = re.sub(r"\*\*([\s\S]*?)\*\*", r"<strong>\1</strong>", escaped)
+    for link in reader_links:
+        anchor = f'<a href="{html_lib.escape(link.group(2), quote=True)}">{html_lib.escape(link.group(1))}</a>'
+        formatted = formatted.replace(html_lib.escape(link.group(0)), anchor)
     html = "<div>" + formatted.replace("\n", "<br>") + "</div>"
     bot.rpc.send_msg(accid, chat_id, MessageData(text=plain_text, html=html))
 
@@ -773,6 +777,11 @@ def daily_devotion_text(site: SiteConfig, target_date: date | None = None) -> st
         else:
             link = site_root
         page_label = f"第 {start}–{end} 页" if pages else "今日安排的页码"
+        group_code = str((config.get("site_info") or {}).get("group_code") or "").strip()
+        if pages and asset:
+            if group_code:
+                link += f"&reader_group={quote(group_code, safe='')}"
+            return f"📖 {site.name} · {target_date.isoformat()}\n[{title}]({link})\n\n阅读 PDF {page_label}（点击标题打开）"
         return f"📖 {site.name} · {target_date.isoformat()}\n{title}\n\n阅读 PDF {page_label}：\n{link}\n（登录 Cedar 网站后可打开）"
     markdown = fetch_text(site, str(source_path))
     section_config = {**devotion, "path": source_path}

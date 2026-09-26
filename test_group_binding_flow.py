@@ -49,6 +49,16 @@ class GroupBindingFlowTests(unittest.TestCase):
             bind.assert_called_once_with(self.service, 85002311)
             self.assertNotIn(900, bot.group_binding_flows)
 
+    def test_potato_renders_cedar_reader_title_as_link(self):
+        text = "📖 灵命组\n[今日灵修](https://example.test/?reader_source=%2Fapi%2Fassets%2F473%2Frange%3Fpages%3D36-37&reader_group=spiritual)"
+        with patch.object(bot, "potato_api") as api:
+            bot.bot.rpc.send_msg(1, 85001808, bot._MessageData(text=text))
+            payload = api.call_args.args[1]
+            self.assertEqual(payload["text"], text)
+            self.assertTrue(payload["markdown"])
+            bot.bot.rpc.send_msg(1, 85001808, bot._MessageData(text="普通提醒"))
+            self.assertNotIn("markdown", api.call_args.args[1])
+
     def test_unmatched_group_lists_only_cedar_sites_and_can_cancel(self):
         with patch.object(bot.reference, "bind_group_to_site") as bind:
             bot._handle_group_binding_flow(900, 77, "管理员 绑定群")

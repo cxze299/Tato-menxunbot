@@ -101,7 +101,9 @@ def potato_api(method,params=None):
 class PotatoRpc:
     def __init__(self): self.chat_types={int(k):int(v) for k,v in reference.state.get("potato_chat_types",{}).items()}
     def send_msg(self,_accid,chat_id,data):
-        potato_api("sendTextMessage",{"chat_type":int(self.chat_types.get(int(chat_id),1)),"chat_id":int(chat_id),"text":data.text})
+        payload={"chat_type":int(self.chat_types.get(int(chat_id),1)),"chat_id":int(chat_id),"text":data.text}
+        if re.search(r"\[[^\]\n]+\]\(https://[^\s)]+\?reader_source=[^\s)]+\)",data.text): payload["markdown"]=True
+        potato_api("sendTextMessage",payload)
         log.info("Potato 消息发送成功：chat_id=%s",chat_id)
     def get_basic_chat_info(self,_accid,chat_id):
         ctype=int(self.chat_types.get(int(chat_id),1)); return SimpleNamespace(chat_type=_ChatType.GROUP if ctype in {2,3} else 1,self_in_group=ctype in {2,3})

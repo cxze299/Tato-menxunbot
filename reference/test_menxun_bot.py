@@ -517,12 +517,20 @@ class MenxunBotTests(unittest.TestCase):
 
     def test_cedar_pdf_plan_sends_reader_link_and_pages(self):
         site = bot.SiteConfig("cedar-spiritual", "Cedar / 灵命组", "https://example.test/api/bot/groups/spiritual", frozenset())
-        config = {"task_sections": {"daily": {"devotion": {"path": "/api/assets/473/download", "type": "pdf", "plan_mode": "custom", "plans": [{"date": "2026-09-26", "title": "今日灵修", "page_start": "36", "page_end": "37"}]}}}}
+        config = {"site_info": {"group_code": "group-652872b0"}, "task_sections": {"daily": {"devotion": {"path": "/api/assets/473/download", "type": "pdf", "plan_mode": "custom", "plans": [{"date": "2026-09-26", "title": "今日灵修", "page_start": "36", "page_end": "37"}]}}}}
         with patch.object(bot, "website_snapshot", return_value=({}, config)), patch.object(bot, "fetch_text") as fetch:
             text = bot.daily_devotion_text(site, date(2026, 9, 26))
         fetch.assert_not_called()
         self.assertIn("第 36–37 页", text)
         self.assertIn("reader_source=%2Fapi%2Fassets%2F473%2Frange%3Fpages%3D36-37", text)
+        self.assertIn("&reader_group=group-652872b0", text)
+        self.assertIn("[今日灵修](https://example.test/", text)
+        sent = []
+        fake_bot = SimpleNamespace(rpc=SimpleNamespace(send_msg=lambda *args: sent.append(args)))
+        bot.send(fake_bot, 1, 9, text)
+        self.assertIn("[今日灵修](https://example.test/", sent[0][2].text)
+        self.assertIn('<a href="https://example.test/?reader_source=', sent[0][2].html)
+        self.assertIn('reader_group=group-652872b0">今日灵修</a>', sent[0][2].html)
 
     def test_cedar_missing_plan_does_not_mark_as_sent(self):
         site = bot.SiteConfig("cedar-spiritual", "Cedar / 灵命组", "https://example.test/api/bot/groups/spiritual", frozenset({101}))
