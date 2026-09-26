@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Potato 适配层：复用完整的门训同行业务逻辑，只替换 Delta Chat 传输层。"""
 from __future__ import annotations
-import importlib.util, json, logging, os, re, ssl, sys, time, types, zoneinfo, threading
+import importlib.util, json, logging, os, re, ssl, sys, time, types, zoneinfo, threading, unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta, timezone
 from http.client import RemoteDisconnected
@@ -16,6 +16,8 @@ if hasattr(sys.stdout,"reconfigure"): sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr,"reconfigure"): sys.stderr.reconfigure(encoding="utf-8")
 REFERENCE=Path(os.getenv("MENXUN_REFERENCE_BOT",str(ROOT/"reference"/"menxun_bot.py")))
 CONFIG=ROOT/"config.json"; DATA=ROOT/"data"
+API_HEALTH=DATA/"api-health.json"
+api_health_last_write=0.0
 if not REFERENCE.exists(): raise SystemExit(f"找不到参考业务实现：{REFERENCE}")
 config=json.loads(CONFIG.read_text(encoding="utf-8-sig")); token=str(config.get("bot_token","")).strip()
 if not token: raise SystemExit(f"请先填写 {CONFIG} 中的 bot_token")
@@ -59,7 +61,8 @@ def potato_api(method,params=None):
     """调用 Potato API；网络/TLS 和服务端短暂故障自动重试。"""
     params=params or {}; query=urlencode({k:v for k,v in params.items() if v is not None})
     last_error=None
-    for attempt in range(4):
+    max_attempts = 8 if method == "sendTextMessage" else 4
+    for attempt in range(max_attempts):
         try:
             if method in {"getMe","getUpdates","delWebhook"}:
                 req=Request(f"{API}/{method}"+("?"+query if query else ""),headers={"Accept":"application/json","Connection":"close"})
@@ -67,8 +70,20 @@ def potato_api(method,params=None):
                 req=Request(f"{API}/{method}",data=json.dumps(params,ensure_ascii=False).encode(),headers={"Content-Type":"application/json; charset=utf-8","Connection":"close"})
             request_timeout = 6 if method == "getUpdates" else 20
             with urlopen(req,timeout=request_timeout) as response:
-                result=json.loads(response.read().decode("utf-8"))
-            if result.get("ok"): return result.get("result")
+                payload=response.read().decode("utf-8")
+            if not payload and method == "getUpdates":
+                return []
+            result=json.loads(payload)
+            if result.get("ok"):
+                if method in {"getMe", "getUpdates"}:
+                    global api_health_last_write
+                    if time.monotonic()-api_health_last_write >= 15:
+                        DATA.mkdir(parents=True,exist_ok=True)
+                        temporary=API_HEALTH.with_suffix(".tmp")
+                        temporary.write_text(json.dumps({"updated_at":time.time()}),encoding="utf-8")
+                        temporary.replace(API_HEALTH)
+                        api_health_last_write=time.monotonic()
+                return result.get("result")
             last_error=RuntimeError(result.get("result") or result.get("description") or "Potato API 请求失败")
             retryable=True
         except HTTPError as error:
@@ -77,15 +92,17 @@ def potato_api(method,params=None):
             retryable=error.code in {429,500,502,503,504}
         except (RemoteDisconnected, TimeoutError, URLError, ConnectionError, ssl.SSLError, json.JSONDecodeError) as error:
             last_error=error; retryable=True
-        if not retryable or attempt==3: break
-        delay=0.8*(2**attempt)
-        log.warning("Potato API 暂时不可用：method=%s attempt=%s/4 error=%s；%.1f 秒后重试",method,attempt+1,last_error,delay)
+        if not retryable or attempt==max_attempts-1: break
+        delay=min(0.8*(2**attempt),8)
+        log.warning("Potato API 暂时不可用：method=%s attempt=%s/%s error=%s；%.1f 秒后重试",method,attempt+1,max_attempts,last_error,delay)
         time.sleep(delay)
     raise last_error or RuntimeError("Potato API 请求失败")
 
 class PotatoRpc:
     def __init__(self): self.chat_types={int(k):int(v) for k,v in reference.state.get("potato_chat_types",{}).items()}
-    def send_msg(self,_accid,chat_id,data): potato_api("sendTextMessage",{"chat_type":int(self.chat_types.get(int(chat_id),1)),"chat_id":int(chat_id),"text":data.text})
+    def send_msg(self,_accid,chat_id,data):
+        potato_api("sendTextMessage",{"chat_type":int(self.chat_types.get(int(chat_id),1)),"chat_id":int(chat_id),"text":data.text})
+        log.info("Potato 消息发送成功：chat_id=%s",chat_id)
     def get_basic_chat_info(self,_accid,chat_id):
         ctype=int(self.chat_types.get(int(chat_id),1)); return SimpleNamespace(chat_type=_ChatType.GROUP if ctype in {2,3} else 1,self_in_group=ctype in {2,3})
     def get_full_chat_by_id(self,accid,chat_id): return self.get_basic_chat_info(accid,chat_id)
@@ -94,7 +111,6 @@ class PotatoRpc:
 class PotatoBot:
     def __init__(self): self.rpc=PotatoRpc(); self.logger=log
 bot=PotatoBot()
-if reference.cli.on_start_callback: reference.cli.on_start_callback(bot,None)
 
 _original_admin_help=reference.admin_help_text
 _original_help=reference.help_text
@@ -108,8 +124,12 @@ reference.help_text=_potato_help
 def _potato_admin_help(super_admin=False, group_admin=False):
     base=_original_admin_help(super_admin,group_admin)
     if not super_admin and not group_admin: return base
+    base=base.replace("管理员 绑定群 网站 群ID — 绑定通知群",
+                      "管理员 绑定群 — 按提示绑定 Cedar 通知群\n管理员 解绑群 — 按提示解除 Cedar 通知群绑定")
     return base+"\n\n【总结推送】\n管理员 本周总结 — 发布本周总结\n管理员 历史总结 — 发布历史总结"
 reference.admin_help_text=_potato_admin_help
+
+reference.admin_bind_group_guide=lambda: "私聊发送“管理员 绑定群”并按提示回复；发送“管理员 解绑群”可解除 Cedar 群绑定。"
 
 def _potato_admin_group_list_text():
     chat_types=reference.state.get("potato_chat_types",{})
@@ -127,9 +147,169 @@ def _potato_admin_group_list_text():
         name=str(chat_names.get(str(group_id),"")).strip()
         label=f" · {name}" if name else ""
         lines.append(f"{group_id}{label}｜{type_name}｜{binding}")
-    lines.extend(["","绑定方法：管理员 绑定群 网站名称 群ID","例如：管理员 绑定群 科大 84973209"])
+    lines.extend(["","发送“管理员 绑定群”按提示绑定 Cedar 小组。","发送“管理员 解绑群”按提示解除绑定。"])
     return "\n".join(lines)
 reference.admin_group_list_text=_potato_admin_group_list_text
+
+group_binding_flows={}
+
+def _cedar_sites():
+    return [site for site in reference.SITES if reference.is_cedar_site(site)]
+
+def _group_name(group_id):
+    return str(reference.state.get("potato_chat_names",{}).get(str(group_id),"")).strip()
+
+def _binding_label(site):
+    return site.name.rsplit("/",1)[-1].strip()
+
+def _match_name(value):
+    value=unicodedata.normalize("NFKC",value).casefold().replace("侍奉","事奉").replace("🚪训","门训")
+    value=value.rsplit("/",1)[-1]
+    for word in ("yds","hz","jh","个人","门训","小组","通知","群聊","群","组"):
+        value=value.replace(word,"")
+    return "".join(char for char in value if char.isalnum())
+
+def _suggest_site(group_id):
+    key=_match_name(_group_name(group_id))
+    if len(key)<2:
+        return None
+    matches=[]
+    for site in _cedar_sites():
+        site_key=_match_name(_binding_label(site))
+        if site_key and (key==site_key or key in site_key or site_key in key):
+            matches.append(site)
+    return matches[0] if len(matches)==1 else None
+
+def _binding_groups(mode):
+    if mode=="bind":
+        return sorted(int(group_id) for group_id,kind in reference.state.get("potato_chat_types",{}).items()
+                      if int(kind) in {2,3} and int(group_id) not in reference.SITE_BY_CHAT_ID)
+    return sorted(group_id for group_id,site in reference.SITE_BY_CHAT_ID.items() if reference.is_cedar_site(site))
+
+def _flow_group_list(mode,groups):
+    title="🧭 选择要绑定的群（回复编号）" if mode=="bind" else "🧭 选择要解绑的 Cedar 通知群（回复编号）"
+    lines=[title]
+    for index,group_id in enumerate(groups,1):
+        name=_group_name(group_id)
+        label=f" · {name}" if name else ""
+        site=_suggest_site(group_id) if mode=="bind" else reference.SITE_BY_CHAT_ID.get(group_id)
+        hint=f" → 建议：{_binding_label(site)}" if mode=="bind" and site else f" → {_binding_label(site)}" if site else ""
+        lines.append(f"{index}. {group_id}{label}{hint}")
+    lines.append("回复“取消”退出。")
+    return "\n".join(lines)
+
+def _flow_site_list():
+    lines=["请选择 Cedar 小组（回复编号）："]
+    lines.extend(f"{index}. {_binding_label(site)}" for index,site in enumerate(_cedar_sites(),1))
+    lines.append("回复“取消”退出。")
+    return "\n".join(lines)
+
+def _start_group_binding_flow(cid,uid,mode):
+    group_binding_flows.pop(cid,None)
+    if not reference.is_super_admin(uid):
+        reference.send(bot,1,cid,"Cedar 通知群绑定与解绑仅限超级管理员。")
+        return
+    if not _cedar_sites():
+        reference.send(bot,1,cid,"尚未配置 Cedar 小组。")
+        return
+    groups=_binding_groups(mode)
+    if not groups:
+        message="没有待绑定的群。请先把机器人加入群，并在群里发送任意消息。" if mode=="bind" else "目前没有已绑定的 Cedar 通知群。"
+        reference.send(bot,1,cid,message)
+        return
+    group_binding_flows[cid]={"uid":uid,"mode":mode,"stage":"group","groups":groups,"expires":time.monotonic()+900}
+    reference.send(bot,1,cid,_flow_group_list(mode,groups))
+
+def _handle_group_binding_flow(cid,uid,text):
+    clean=text.strip().rstrip("！!。.")
+    if re.match(r"^管理员\s*绑定群",clean):
+        _start_group_binding_flow(cid,uid,"bind")
+        return True
+    if re.match(r"^管理员\s*解绑群",clean):
+        _start_group_binding_flow(cid,uid,"unbind")
+        return True
+    flow=group_binding_flows.get(cid)
+    if not flow:
+        return False
+    if clean.startswith("管理员"):
+        group_binding_flows.pop(cid,None)
+        return False
+    if flow["uid"]!=uid or not reference.is_super_admin(uid):
+        group_binding_flows.pop(cid,None)
+        reference.send(bot,1,cid,"该操作仅限发起流程的超级管理员。")
+        return True
+    if time.monotonic()>flow["expires"]:
+        group_binding_flows.pop(cid,None)
+        reference.send(bot,1,cid,"操作已超时。请重新发送“管理员 绑定群”或“管理员 解绑群”。")
+        return True
+    if clean in {"取消","退出"}:
+        group_binding_flows.pop(cid,None)
+        reference.send(bot,1,cid,"已取消，群绑定未变更。")
+        return True
+    if flow["stage"]=="group":
+        groups=flow["groups"]
+        group_id=groups[int(clean)-1] if clean.isdigit() and 1<=int(clean)<=len(groups) else int(clean) if clean.isdigit() and int(clean) in groups else None
+        if group_id is None:
+            reference.send(bot,1,cid,_flow_group_list(flow["mode"],groups))
+            return True
+        flow["group_id"]=group_id
+        if flow["mode"]=="unbind":
+            site=reference.SITE_BY_CHAT_ID.get(group_id)
+            if not site or not reference.is_cedar_site(site):
+                group_binding_flows.pop(cid,None)
+                reference.send(bot,1,cid,"该群的 Cedar 绑定已变化，请重新开始。")
+                return True
+            flow["site_id"]=site.site_id
+        else:
+            site=_suggest_site(group_id)
+            if not site:
+                flow["stage"]="site"
+                reference.send(bot,1,cid,_flow_site_list())
+                return True
+            flow["site_id"]=site.site_id
+        flow["stage"]="confirm"
+        site=reference.SITE_BY_ID[flow["site_id"]]
+        verb="绑定到" if flow["mode"]=="bind" else "从此小组解绑"
+        option="；回复“其他”选择小组" if flow["mode"]=="bind" else ""
+        reference.send(bot,1,cid,f"群：{group_id} · {_group_name(group_id) or '未命名'}\nCedar 小组：{_binding_label(site)}\n确认{verb}？回复“确认”{option}，或回复“取消”。")
+        return True
+    if flow["stage"]=="site":
+        sites=_cedar_sites()
+        site=sites[int(clean)-1] if clean.isdigit() and 1<=int(clean)<=len(sites) else reference.find_site(clean)
+        if not site or not reference.is_cedar_site(site):
+            reference.send(bot,1,cid,_flow_site_list())
+            return True
+        flow["site_id"]=site.site_id
+        flow["stage"]="confirm"
+        reference.send(bot,1,cid,f"群：{flow['group_id']} · {_group_name(flow['group_id']) or '未命名'}\nCedar 小组：{_binding_label(site)}\n确认绑定？回复“确认”，或回复“取消”。")
+        return True
+    if clean=="其他" and flow["mode"]=="bind":
+        flow["stage"]="site"
+        reference.send(bot,1,cid,_flow_site_list())
+        return True
+    if clean!="确认":
+        reference.send(bot,1,cid,"请回复“确认”或“取消”；绑定时也可回复“其他”重新选择小组。")
+        return True
+    group_binding_flows.pop(cid,None)
+    site=reference.SITE_BY_ID.get(flow["site_id"])
+    if not site or not reference.is_cedar_site(site):
+        reference.send(bot,1,cid,"小组配置已变化，请重新开始。")
+        return True
+    group_id=flow["group_id"]
+    try:
+        if flow["mode"]=="bind":
+            group_chat=bot.rpc.get_full_chat_by_id(1,group_id)
+            if group_chat.chat_type!=_ChatType.GROUP or not group_chat.self_in_group:
+                raise ValueError("机器人已不在该群，请重新加入后再绑定。")
+            reference.bind_group_to_site(site,group_id)
+            result="绑定"
+        else:
+            reference.unbind_group_from_site(site,group_id)
+            result="解绑"
+        reference.send(bot,1,cid,f"✅ 已{result}：群 {group_id} · {_binding_label(site)}。配置已保存并立即生效。")
+    except (ValueError,RuntimeError,OSError) as error:
+        reference.send(bot,1,cid,f"❌ {error}")
+    return True
 
 def _percent(done,total): return f"{(done*100/total):.1f}%" if total else "0.0%"
 
@@ -272,6 +452,7 @@ def dispatch(update):
     # 群聊只作为通知出口；任何群消息都不进入命令处理器，也不回复帮助。
     if ctype in {2,3}:
         return
+    if _handle_group_binding_flow(int(cid),uid,message.get("text") or ""): return
     if _handle_potato_admin_summary(int(cid),uid,message.get("text") or ""): return
     if _send_private_summary(int(cid),uid,message.get("text") or ""): return
     event=SimpleNamespace(msg=SimpleNamespace(chat_id=int(cid),from_id=uid,text=message.get("text") or ""))
@@ -289,17 +470,36 @@ def dispatch_ordered(update):
     if elapsed >= 1:
         log.info("消息处理完成：chat_id=%s elapsed=%.2fs",lock_key,elapsed)
 
+def log_dispatch_failure(future):
+    error=future.exception()
+    if error is not None:
+        log.error("Potato 消息处理或回复失败",exc_info=(type(error),error,error.__traceback__))
+
 def main():
-    potato_api("getMe"); log.info("Potato 门训同行机器人已启动（完整参考业务模式）"); offset=0
+    while True:
+        try:
+            potato_api("getMe")
+            break
+        except KeyboardInterrupt:
+            return
+        except Exception:
+            log.exception("Potato 启动认证暂时失败，10 秒后重试")
+            time.sleep(10)
+    if reference.cli.on_start_callback:
+        reference.cli.on_start_callback(bot,None)
+    log.info("Potato 门训同行机器人已启动（完整参考业务模式）"); offset=0
     while True:
         try:
             # Potato 服务端偶尔会关闭空闲长轮询连接；短轮询更稳定，断开后自动续拉。
             # 短轮询让新消息尽快返回；消息本身交给线程池处理，不阻塞下一轮拉取。
             for update in potato_api("getUpdates",{"offset":offset,"timeout":1}) or []:
-                offset=max(offset,int(update["update_id"])+1); dispatch_pool.submit(dispatch_ordered,update)
+                offset=max(offset,int(update["update_id"])+1)
+                dispatch_pool.submit(dispatch_ordered,update).add_done_callback(log_dispatch_failure)
         except KeyboardInterrupt:return
         except (RemoteDisconnected, TimeoutError, URLError, ConnectionError) as error:
             log.warning("Potato 轮询连接中断，将自动重试：%s", error)
             time.sleep(2)
-        except Exception: log.exception("Potato 轮询失败")
+        except Exception:
+            log.exception("Potato 轮询失败，2 秒后重试")
+            time.sleep(2)
 if __name__=="__main__": main()

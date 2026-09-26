@@ -59,7 +59,7 @@ chmod +x manage-native.sh
 ./manage-native.sh health
 ```
 
-当前 NAS 使用上述 Python 3.12 原生方式。若要在 NAS 重启后自动启动，请在 DSM 的“控制面板 → 任务计划 → 新增 → 触发的任务 → 用户定义的脚本”中选择开机事件，用户选择 `yimaneili`，脚本填写：
+当前 NAS 使用上面的 Docker Compose 方式，容器设置了 `restart: unless-stopped`，会在 Docker 服务重启后自动恢复。若改用 Python 3.12 原生方式，需在 DSM 的“控制面板 → 任务计划 → 新增 → 触发的任务 → 用户定义的脚本”中选择开机事件，用户选择 `yimaneili`，脚本填写：
 
 ```sh
 /volume2/docker/potato-menxun-bot/manage-native.sh start
@@ -76,10 +76,12 @@ chmod +x manage-native.sh
 管理员也可以私聊机器人执行：
 
 ```text
-管理员 绑定群 科大 123456
+管理员 绑定群
 ```
 
-或手动把 ID 写入 `config.json`：
+按机器人私聊提示选择已发现的群、确认匹配的 Cedar 小组后即可绑定；发送 `管理员 解绑群` 可解除绑定。该入口只管理 Cedar 小组。旧网站的现有通知群配置可继续保留。
+
+如需手动配置，可把群 ID 写入对应 Cedar 小组的 `config.json` 条目：
 
 ```json
 "chat_ids": [123456]

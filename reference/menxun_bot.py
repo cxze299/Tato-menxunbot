@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import re
@@ -209,6 +210,7 @@ def load_state() -> dict:
     loaded.setdefault("warm_reminders", {})
     loaded.setdefault("member_join_dates", {})
     loaded.setdefault("website_event_cursors", {})
+    loaded.setdefault("website_event_deliveries", {})
     if not isinstance(loaded["admins"], dict):
         loaded["admins"] = {}
     if not isinstance(loaded["super_admins"], dict):
@@ -229,6 +231,8 @@ def load_state() -> dict:
         loaded["member_join_dates"] = {}
     if not isinstance(loaded["website_event_cursors"], dict):
         loaded["website_event_cursors"] = {}
+    if not isinstance(loaded["website_event_deliveries"], dict):
+        loaded["website_event_deliveries"] = {}
     return loaded
 
 
@@ -922,7 +926,7 @@ def site_list_text(member_id: int = 0) -> str:
     lines.extend([
         "",
         "请直接回复上面的网站名称。",
-        "例如：科大",
+        "例如：科大门训",
         "",
         "选择后，机器人会告诉你下一步怎么做。",
     ])
@@ -931,7 +935,7 @@ def site_list_text(member_id: int = 0) -> str:
 
 def site_choice_name(site: SiteConfig) -> str:
     return {
-        "zk": "科大",
+        "zk": "科大（旧网站）",
         "agape": "Agape",
         "zhewai": "浙外特教",
         "longway": "Longway",
@@ -943,7 +947,7 @@ def find_site(value: str) -> SiteConfig | None:
     clean = value.strip().lower()
     alias_id = {
         "科大": "zk",
-        "科大门训": "zk",
+        "科大门训": "cedar-zk",
         "agape": "agape",
         "浙外": "zhewai",
         "浙外门训": "zhewai",
@@ -1404,6 +1408,44 @@ def checkin_timeline(
     return title, rows
 
 
+def bot_api_checkin_timeline(
+    site: SiteConfig, label: str, logical_date: str, task_type: str,
+    task_id: int = 0, week_id: int = 0,
+    excluded_names: frozenset[str] = frozenset(),
+) -> tuple[str, list[str]]:
+    """Use the same time-ordered group list for every 7399 task type."""
+    website_state, config = website_snapshot(site)
+    schedule = website_state.get("weeklySchedule") or config.get("weekly_schedule") or []
+    target_plan = current_week(schedule, date.fromisoformat(logical_date))
+    first_by_name: dict[str, tuple[float, datetime | None]] = {}
+    daily = task_type.startswith("daily_")
+    for record in website_state.get("records") or []:
+        name = record_name(record)
+        if not name or name in excluded_names or record.get("task_type") != task_type:
+            continue
+        if task_id and int(record.get("task_id") or 0) != task_id:
+            continue
+        if daily:
+            if record_logical_date(record, site) != logical_date:
+                continue
+        elif week_id:
+            if int(record.get("week_id") or 0) != week_id:
+                continue
+        elif not target_plan or not (str(target_plan["start"]) <= record_logical_date(record, site) <= str(target_plan["end"])):
+            continue
+        value = record_datetime(record, site)
+        sort_value = value.timestamp() if value else float("inf")
+        if name not in first_by_name or sort_value < first_by_name[name][0]:
+            first_by_name[name] = (sort_value, value)
+    ordered = sorted(first_by_name.items(), key=lambda item: (item[1][0], item[0]))
+    title = f"{logical_date} · {label}（按时间）" if daily else f"本周 · {label}（按时间）"
+    rows = []
+    for index, (name, (_, value)) in enumerate(ordered, 1):
+        time_text = value.strftime("%H:%M" if daily else "%m-%d %H:%M") if value else "时间未知"
+        rows.append(f"{index}. {time_text}  {name}")
+    return title, rows
+
+
 def build_group_update(
     site: SiteConfig,
     name: str,
@@ -1414,6 +1456,8 @@ def build_group_update(
     operation_time: str = "",
     event_time: str = "",
     task_type: str = "",
+    task_id: int = 0,
+    week_id: int = 0,
 ) -> str:
     legacy_types = {"每日灵修": "灵修", "周读物": "周读物", "周视频": "视频", "周背经": "背经"}
     display_type = legacy_types.get(checkin_type, checkin_type)
@@ -1425,22 +1469,29 @@ def build_group_update(
         headline += f"（补签 {logical_date}）"
     if operation_time:
         headline += f"\n操作时间：{operation_time}"
-    if checkin_type not in legacy_types:
-        if cancelled:
-            return headline
-        fallback_time = event_time or now(site).strftime("%m-%d %H:%M")
-        scope = logical_date if task_type.startswith("daily_") else "本周"
-        return headline + f"\n\n{scope} · 本次记录\n1. {fallback_time}  {name}"
     try:
-        title, rows = checkin_timeline(
-            site,
-            checkin_type,
-            logical_date,
-            frozenset({name}) if cancelled else frozenset(),
-        )
+        if "/api/bot/groups/" in site.url and task_type:
+            title, rows = bot_api_checkin_timeline(
+                site, display_type, logical_date, task_type, task_id, week_id,
+            )
+        elif checkin_type in legacy_types:
+            title, rows = checkin_timeline(
+                site, checkin_type, logical_date,
+                frozenset({name}) if cancelled else frozenset(),
+            )
+        else:
+            raise ValueError("task timeline unavailable")
     except Exception:
+        if "/api/bot/groups/" in site.url and task_type:
+            raise
+        if checkin_type not in legacy_types and not cancelled:
+            fallback_time = event_time or now(site).strftime("%m-%d %H:%M")
+            scope = logical_date if task_type.startswith("daily_") else "本周"
+            return headline + f"\n\n{scope} · 本次记录\n1. {fallback_time}  {name}"
         return headline + "\n名单暂时无法读取，请发送“群状态”重试。"
     if not rows and not cancelled:
+        if "/api/bot/groups/" in site.url and task_type:
+            raise RuntimeError(f"网站打卡名单尚未包含本次记录：site={site.site_id} task={task_type}")
         fallback_time = event_time or now(site).strftime("%m-%d %H:%M")
         return headline + f"\n\n本次记录\n1. {fallback_time}  {name}"
     return headline + f"\n\n{title}\n" + ("\n".join(rows) if rows else "暂无打卡")
@@ -1541,7 +1592,9 @@ def poll_website_notifications(bot, accid: int, site: SiteConfig) -> int:
                 retro=bool(summary.get("retro")),
                 operation_time=operation_time,
             )
-            broadcast_group_update(bot, accid, site, message)
+            delivery_key = f"{site.site_id}:cancel:{fingerprint}:{checkin_type}"
+            if broadcast_group_update(bot, accid, site, message, delivery_key) < len(site.chat_ids):
+                raise RuntimeError(f"网站取消打卡通知未全部送达：site={site.site_id}")
             delivered_events += 1
 
     fallback_time = datetime.min.replace(tzinfo=ZoneInfo(site.timezone))
@@ -1565,11 +1618,17 @@ def poll_website_notifications(bot, accid: int, site: SiteConfig) -> int:
                 retro=record_is_retro(record),
                 event_time=(record_datetime(record, site) or now(site)).strftime("%m-%d %H:%M"),
             )
-            broadcast_group_update(bot, accid, site, message)
+            delivery_key = f"{site.site_id}:checkin:{record_fingerprint(record)}:{checkin_type}"
+            if broadcast_group_update(bot, accid, site, message, delivery_key) < len(site.chat_ids):
+                raise RuntimeError(f"网站打卡通知未全部送达：site={site.site_id}")
             delivered_events += 1
 
     with state_lock:
         state["website_records"][site.site_id] = current_compact
+        state["website_event_deliveries"] = {
+            key: value for key, value in state["website_event_deliveries"].items()
+            if not key.startswith(f"{site.site_id}:")
+        }
         cutoff = time.time() - 600
         state["recent_announcements"] = {
             key: value for key, value in state["recent_announcements"].items()
@@ -1616,22 +1675,39 @@ def poll_bot_api_events(bot, accid: int, site: SiteConfig) -> int:
             operation_time=operation_time if cancelled else "",
             event_time=event_time,
             task_type=task_type,
+            task_id=int(event.get("task_id") or 0),
+            week_id=int(event.get("week_id") or 0),
         )
-        broadcast_group_update(bot, accid, site, message)
+        delivery_key = f"{site.site_id}:{event.get('id')}:{changed_at}:{action}"
+        if broadcast_group_update(bot, accid, site, message, delivery_key) < len(site.chat_ids):
+            raise RuntimeError(f"网站事件通知未全部送达：site={site.site_id} event={event.get('id')}")
         delivered += 1
     next_cursor = str(payload.get("cursor") or cursor)
     with state_lock:
         state["website_event_cursors"][site.site_id] = next_cursor
+        state["website_event_deliveries"] = {
+            key: value for key, value in state["website_event_deliveries"].items()
+            if not key.startswith(f"{site.site_id}:")
+        }
         save_state()
     return delivered
 
 
-def broadcast_group_update(bot, accid: int, site: SiteConfig, message: str) -> int:
+def broadcast_group_update(bot, accid: int, site: SiteConfig, message: str, delivery_key: str = "") -> int:
     delivered = 0
     for group_chat_id in sorted(site.chat_ids):
+        if delivery_key and group_chat_id in state["website_event_deliveries"].get(delivery_key, []):
+            delivered += 1
+            continue
         try:
             send(bot, accid, group_chat_id, message)
             delivered += 1
+            if delivery_key:
+                with state_lock:
+                    sent = state["website_event_deliveries"].setdefault(delivery_key, [])
+                    if group_chat_id not in sent:
+                        sent.append(group_chat_id)
+                        save_state()
         except Exception as error:
             bot.logger.exception("发送群通知失败：site=%s chat_id=%s error=%s", site.site_id, group_chat_id, error)
     return delivered
@@ -1665,7 +1741,14 @@ def announce_change(
 ) -> None:
     delivered = broadcast_group_update(bot, accid, site, message)
     if not is_group:
-        suffix = f"已通知 {delivered} 个群。" if delivered else "该网站还没有配置通知群。"
+        if delivered:
+            suffix = f"已通知 {delivered} 个群。"
+        elif site.chat_ids:
+            suffix = f"{site.name} 已配置通知群，但本次发送失败，请稍后重试。"
+        elif site.site_id == "zk" and SITE_BY_ID.get("cedar-zk") and SITE_BY_ID["cedar-zk"].chat_ids:
+            suffix = "本次操作在旧网站“科大”，而通知群绑定在 Cedar“科大门训”。两站数据独立；如需通知该群，请先发送“切换 cedar-zk”并绑定 Cedar 网站中的姓名，再在 Cedar 打卡。"
+        else:
+            suffix = f"本次操作的网站“{site.name}”没有绑定通知群。"
         send(bot, accid, origin_chat_id, f"{private_result}\n{suffix}")
     elif origin_chat_id not in site.chat_ids:
         send(bot, accid, origin_chat_id, message)
@@ -1746,14 +1829,20 @@ def site_config_row(site: SiteConfig) -> dict:
     }
 
 
-def bind_group_to_site(site: SiteConfig, group_id: int) -> SiteConfig:
-    """持久化网站群 ID 并刷新内存路由，使配置立即生效。"""
+def is_cedar_site(site: SiteConfig) -> bool:
+    return "/api/bot/groups/" in site.url
+
+
+def set_group_binding(site: SiteConfig, group_id: int, enabled: bool) -> SiteConfig:
+    """Persist Cedar group bindings and refresh in-memory routing immediately."""
     global SITES, SITE_BY_ID, SITE_BY_CHAT_ID, DEFAULT_SITE
     if os.getenv("MENXUN_SITES_JSON", "").strip():
         raise RuntimeError("当前使用 MENXUN_SITES_JSON 环境变量，无法在聊天中修改群配置。")
     existing = SITE_BY_CHAT_ID.get(group_id)
-    if existing and existing.site_id != site.site_id:
+    if enabled and existing and existing.site_id != site.site_id:
         raise ValueError(f"群 {group_id} 已绑定到 {existing.name}。")
+    if not enabled and (not existing or existing.site_id != site.site_id):
+        raise ValueError(f"群 {group_id} 当前没有绑定到 {site.name}。")
     with sites_lock:
         if SITES_FILE.exists():
             source = json.loads(SITES_FILE.read_text(encoding="utf-8-sig"))
@@ -1765,7 +1854,8 @@ def bind_group_to_site(site: SiteConfig, group_id: int) -> SiteConfig:
         matched = False
         for row in rows:
             if isinstance(row, dict) and str(row.get("id", "")).strip().lower() == site.site_id:
-                row["chat_ids"] = sorted(set(parse_chat_ids(row.get("chat_ids", []))) | {group_id})
+                chat_ids = set(parse_chat_ids(row.get("chat_ids", [])))
+                row["chat_ids"] = sorted(chat_ids | {group_id} if enabled else chat_ids - {group_id})
                 matched = True
                 break
         if not matched:
@@ -1774,13 +1864,31 @@ def bind_group_to_site(site: SiteConfig, group_id: int) -> SiteConfig:
         SITES_FILE.parent.mkdir(parents=True, exist_ok=True)
         temporary = SITES_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(SITES_FILE)
+        try:
+            temporary.replace(SITES_FILE)
+        except OSError as error:
+            if error.errno != errno.EBUSY:
+                raise
+            # Docker single-file bind mounts cannot be replaced, but remain writable.
+            with SITES_FILE.open("w", encoding="utf-8") as mounted_file:
+                mounted_file.write(temporary.read_text(encoding="utf-8"))
+                mounted_file.flush()
+                os.fsync(mounted_file.fileno())
+            temporary.unlink()
         refreshed = load_sites()
         SITES = refreshed
         SITE_BY_ID = {item.site_id: item for item in refreshed}
         SITE_BY_CHAT_ID = {chat_id: item for item in refreshed for chat_id in item.chat_ids}
         DEFAULT_SITE = refreshed[0]
         return SITE_BY_ID[site.site_id]
+
+
+def bind_group_to_site(site: SiteConfig, group_id: int) -> SiteConfig:
+    return set_group_binding(site, group_id, True)
+
+
+def unbind_group_from_site(site: SiteConfig, group_id: int) -> SiteConfig:
+    return set_group_binding(site, group_id, False)
 
 
 def admin_site_status_text() -> str:

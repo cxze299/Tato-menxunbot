@@ -145,6 +145,17 @@ class MenxunBotTests(unittest.TestCase):
         broadcast.assert_called_once_with(fake_bot, 1, self.site, "群通知")
         send.assert_called_once_with(fake_bot, 1, 900, "打卡成功\n已通知 2 个群。")
 
+    def test_old_site_does_not_claim_cedar_group_is_unconfigured(self):
+        old = bot.SiteConfig("zk", "科大", "https://example.test:1777", frozenset())
+        cedar = bot.SiteConfig("cedar-zk", "香柏木门训 / 科大门训", "https://example.test:7399/api/bot/groups/zk", frozenset({84801506}))
+        with patch.object(bot, "SITE_BY_ID", {"zk": old, "cedar-zk": cedar}), patch.object(bot, "broadcast_group_update", return_value=0), patch.object(bot, "send") as send:
+            self.assertIs(bot.find_site("科大门训"), cedar)
+            bot.announce_change(SimpleNamespace(), 1, 900, False, old, "群通知", "取消打卡成功")
+        reply = send.call_args.args[3]
+        self.assertIn("旧网站", reply)
+        self.assertIn("切换 cedar-zk", reply)
+        self.assertIn("两站数据独立", reply)
+
     def test_website_poll_baselines_then_notifies_new_checkin_and_retro(self):
         initial = {"records": [{"Id": 1, "name": "甲", "logical_date": "2026-08-21", "daily": "done"}]}
         updated = {"records": [
@@ -154,10 +165,10 @@ class MenxunBotTests(unittest.TestCase):
         ]}
         temporary_state = {
             "website_records": {}, "recent_announcements": {}, "bindings": {}, "active_sites": {},
-            "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {},
+            "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {}, "website_event_deliveries": {},
         }
         fake_bot = SimpleNamespace()
-        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", side_effect=[(initial, {}), (updated, {})]), patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|{day}|retro={kwargs.get('retro')}"), patch.object(bot, "broadcast_group_update") as broadcast:
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", side_effect=[(initial, {}), (updated, {})]), patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|{day}|retro={kwargs.get('retro')}"), patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
             self.assertEqual(bot.poll_website_notifications(fake_bot, 1, self.site), 0)
             self.assertEqual(bot.poll_website_notifications(fake_bot, 1, self.site), 2)
         messages = [call.args[3] for call in broadcast.call_args_list]
@@ -167,7 +178,7 @@ class MenxunBotTests(unittest.TestCase):
     def test_website_poll_migrates_legacy_baseline_without_false_cancellation(self):
         temporary_state = {
             "website_records": {self.site.site_id: ["id:1", "id:2"]}, "recent_announcements": {},
-            "bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {},
+            "bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {}, "website_event_deliveries": {},
         }
         remaining = {"records": [{"Id": 1, "name": "甲", "logical_date": "2026-08-21", "daily": "done"}]}
         with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", return_value=(remaining, {})), patch.object(bot, "broadcast_group_update") as broadcast:
@@ -180,10 +191,10 @@ class MenxunBotTests(unittest.TestCase):
         }
         temporary_state = {
             "website_records": {self.site.site_id: {"id:2": previous_summary}}, "recent_announcements": {},
-            "bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {},
+            "bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {}, "website_event_deliveries": {},
         }
         fixed_now = datetime(2026, 8, 22, 19, 45, 12, tzinfo=bot.ZoneInfo("Asia/Shanghai"))
-        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", return_value=({"records": []}, {})), patch.object(bot, "now", return_value=fixed_now), patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|cancelled={kwargs.get('cancelled')}|time={kwargs.get('operation_time')}"), patch.object(bot, "broadcast_group_update") as broadcast:
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", return_value=({"records": []}, {})), patch.object(bot, "now", return_value=fixed_now), patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|cancelled={kwargs.get('cancelled')}|time={kwargs.get('operation_time')}"), patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
             self.assertEqual(bot.poll_website_notifications(SimpleNamespace(), 1, self.site), 2)
         messages = [call.args[3] for call in broadcast.call_args_list]
         self.assertIn("乙|每日灵修|cancelled=True|time=2026-08-22 19:45:12", messages)
@@ -198,7 +209,7 @@ class MenxunBotTests(unittest.TestCase):
             api_key="secret",
         )
         temporary_state = {
-            "website_event_cursors": {}, "recent_announcements": {}, "bindings": {},
+            "website_event_cursors": {}, "recent_announcements": {}, "website_event_deliveries": {}, "bindings": {},
             "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {}, "welcomed": {},
         }
         initial = {"cursor": "2026-08-22T00:00:00Z,0", "events": []}
@@ -209,7 +220,7 @@ class MenxunBotTests(unittest.TestCase):
                 {"action": "cancel", "name": "乙", "type": "每日灵修", "logical_date": "2026-08-22", "changed_at": "2026-08-22T12:01:00Z", "is_retro": False},
             ],
         }
-        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", side_effect=[initial, updated]) as fetch, patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|retro={kwargs.get('retro')}|cancelled={kwargs.get('cancelled')}") as build, patch.object(bot, "broadcast_group_update") as broadcast:
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", side_effect=[initial, updated]) as fetch, patch.object(bot, "build_group_update", side_effect=lambda site, name, kind, day, **kwargs: f"{name}|{kind}|retro={kwargs.get('retro')}|cancelled={kwargs.get('cancelled')}") as build, patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
             self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 0)
             self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 2)
         self.assertEqual(fetch.call_args_list[0].args[1], "/api/events")
@@ -226,16 +237,73 @@ class MenxunBotTests(unittest.TestCase):
             site_id="cedar-test", name="香柏木门训 / 测试组",
             url="https://example.test/api/bot/groups/test", chat_ids=frozenset({101}), api_key="secret",
         )
-        temporary_state = {"website_event_cursors": {api_site.site_id: "old,0"}, "recent_announcements": {}}
+        temporary_state = {"website_event_cursors": {api_site.site_id: "old,0"}, "recent_announcements": {}, "website_event_deliveries": {}}
         payload = {"cursor": "new,1", "events": [{
             "action": "checkin", "name": "甲", "type": "生命操练", "task_type": "weekly_checkin",
             "logical_date": "2026-09-22", "changed_at": "2026-09-22T12:00:00Z", "is_retro": False,
         }]}
-        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", return_value=payload), patch.object(bot, "broadcast_group_update") as broadcast:
+        records = [{"name": "甲", "task_type": "weekly_checkin", "logical_date": "2026-09-22",
+                    "checkin_time": "2026-09-22T12:00:00+08:00"}]
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "fetch_json", return_value=payload), patch.object(bot, "website_snapshot", return_value=({"records": records, "weeklySchedule": [{"start": "2026-09-21", "end": "2026-09-27"}]}, {})), patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
             self.assertEqual(bot.poll_bot_api_events(SimpleNamespace(), 1, api_site), 1)
         message = broadcast.call_args.args[3]
         self.assertIn("甲打卡了：生命操练", message)
-        self.assertIn("本周 · 本次记录", message)
+        self.assertIn("本周 · 生命操练（按时间）\n1. 09-22 12:00  甲", message)
+
+    def test_bot_api_custom_task_uses_time_ordered_group_list(self):
+        api_site = bot.SiteConfig(
+            site_id="cedar-test", name="香柏木门训 / 测试组",
+            url="https://example.test/api/bot/groups/test", chat_ids=frozenset({101}),
+        )
+        records = [
+            {"name": "乙", "task_type": "weekly_checkin", "task_id": 7, "week_id": 3,
+             "logical_date": "2026-09-22", "checkin_time": "2026-09-22T10:00:00+08:00"},
+            {"name": "甲", "task_type": "weekly_checkin", "task_id": 7, "week_id": 3,
+             "logical_date": "2026-09-22", "checkin_time": "2026-09-22T09:00:00+08:00"},
+            {"name": "丙", "task_type": "weekly_checkin", "task_id": 8, "week_id": 3,
+             "logical_date": "2026-09-22", "checkin_time": "2026-09-22T08:00:00+08:00"},
+        ]
+        with patch.object(bot, "website_snapshot", return_value=({"records": records}, {})):
+            message = bot.build_group_update(api_site, "乙", "生命操练", "2026-09-22",
+                                             task_type="weekly_checkin", task_id=7, week_id=3)
+        self.assertIn("✅ 乙打卡了：生命操练", message)
+        self.assertIn("本周 · 生命操练（按时间）\n1. 09-22 09:00  甲\n2. 09-22 10:00  乙", message)
+        self.assertNotIn("丙", message)
+
+    def test_every_cedar_task_uses_same_full_timeline_layout(self):
+        api_site = bot.SiteConfig(
+            site_id="cedar-test", name="香柏木门训 / 灵命组",
+            url="https://example.test/api/bot/groups/yds-hz", chat_ids=frozenset({101}),
+        )
+        cases = (
+            ("daily_devotion", "每日灵修", 0, 0, "2026-09-20 · 灵修（按时间）", "06:28"),
+            ("daily_scripture", "每日读经", 0, 0, "2026-09-20 · 每日读经（按时间）", "06:28"),
+            ("weekly_checkin", "生命操练", 7, 3, "本周 · 生命操练（按时间）", "09-20 06:28"),
+            ("weekly_book", "周读物", 8, 3, "本周 · 周读物（按时间）", "09-20 06:28"),
+            ("weekly_video", "周视频", 9, 3, "本周 · 视频（按时间）", "09-20 06:28"),
+            ("weekly_verse", "周背经", 10, 3, "本周 · 背经（按时间）", "09-20 06:28"),
+            ("weekly_outline", "提纲背诵", 11, 3, "本周 · 提纲背诵（按时间）", "09-20 06:28"),
+        )
+        for task_type, label, task_id, week_id, title, time_text in cases:
+            with self.subTest(task_type=task_type):
+                records = [
+                    {"name": "亮亮", "task_type": task_type, "task_id": task_id, "week_id": week_id,
+                     "logical_date": "2026-09-20", "checkin_time": "2026-09-20T23:02:00+08:00"},
+                    {"name": "刘欣", "task_type": task_type, "task_id": task_id, "week_id": week_id,
+                     "logical_date": "2026-09-20", "checkin_time": "2026-09-20T06:28:00+08:00"},
+                    {"name": "别组成员", "task_type": "daily_scripture" if task_type != "daily_scripture" else "daily_devotion",
+                     "task_id": task_id, "week_id": week_id, "logical_date": "2026-09-20",
+                     "checkin_time": "2026-09-20T05:00:00+08:00"},
+                ]
+                with patch.object(bot, "website_snapshot", return_value=({"records": records}, {})):
+                    message = bot.build_group_update(
+                        api_site, "亮亮", label, "2026-09-20",
+                        task_type=task_type, task_id=task_id, week_id=week_id,
+                    )
+                self.assertEqual(message.splitlines()[0], "✅ 亮亮打卡了：" + ({"每日灵修": "灵修", "周视频": "视频", "周背经": "背经"}.get(label, label)))
+                self.assertIn(f"\n\n{title}\n1. {time_text}  刘欣\n2. ", message)
+                self.assertTrue(message.endswith("  亮亮"))
+                self.assertNotIn("别组成员", message)
 
     def test_cancel_group_update_includes_operation_time(self):
         with patch.object(bot, "checkin_timeline", return_value=("当天灵修（按时间）", [])):
@@ -263,12 +331,12 @@ class MenxunBotTests(unittest.TestCase):
         temporary_state = {
             "website_records": {self.site.site_id: {"id:1": {"name": "信择", "logical_date": "2026-08-22", "types": ["每日灵修"], "retro": False}}},
             "recent_announcements": {}, "bindings": {}, "active_sites": {}, "checkins": {},
-            "reminded": {}, "admins": {}, "welcomed": {},
+            "reminded": {}, "admins": {}, "welcomed": {}, "website_event_deliveries": {},
         }
         current = {"records": [{"Id": 2, "name": "信择", "logical_date": "2026-08-22", "daily": "done", "checkin_time": "2026-08-22T19:44:00+08:00"}]}
         def build_message(site, name, kind, day, **kwargs):
             return "取消" if kwargs.get("cancelled") else "打卡"
-        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", return_value=(current, {})), patch.object(bot, "build_group_update", side_effect=build_message), patch.object(bot, "broadcast_group_update") as broadcast:
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "save_state"), patch.object(bot, "website_snapshot", return_value=(current, {})), patch.object(bot, "build_group_update", side_effect=build_message), patch.object(bot, "broadcast_group_update", return_value=1) as broadcast:
             self.assertEqual(bot.poll_website_notifications(SimpleNamespace(), 1, self.site), 2)
         self.assertEqual([call.args[3] for call in broadcast.call_args_list], ["取消", "打卡"])
 
@@ -594,17 +662,27 @@ class MenxunBotTests(unittest.TestCase):
         self.assertIn("test:2026-08-25:devotion:101", temporary_state["reminded"])
 
     def test_admin_can_bind_group_from_private_chat(self):
+        cedar_site = bot.SiteConfig(site_id="cedar-test", name="Cedar / 测试组", url="https://example.test/api/bot/groups/test", chat_ids=frozenset())
         temporary_state = {"bindings": {}, "active_sites": {}, "checkins": {}, "reminded": {}, "admins": {
             "77": {"verified_at": "2026-08-21T10:00:00+08:00"}
         }}
         group = SimpleNamespace(chat_type=bot.ChatType.GROUP, self_in_group=True)
         fake_bot = SimpleNamespace(rpc=SimpleNamespace(get_full_chat_by_id=lambda _accid, _chat_id: group))
-        updated = bot.SiteConfig(site_id="test", name="测试网站", url="https://example.test", chat_ids=frozenset({101}))
+        updated = bot.SiteConfig(site_id="cedar-test", name="Cedar / 测试组", url=cedar_site.url, chat_ids=frozenset({101}))
         with patch.object(bot, "state", temporary_state), patch.object(bot, "bind_group_to_site", return_value=updated) as bind_group, patch.object(bot, "send") as send:
-            handled = bot.handle_admin_command(fake_bot, 1, 900, 77, False, self.site, "管理员 绑定群 101")
+            handled = bot.handle_admin_command(fake_bot, 1, 900, 77, False, cedar_site, "管理员 绑定群 101")
             self.assertTrue(handled)
-            bind_group.assert_called_once_with(self.site, 101)
+            bind_group.assert_called_once_with(cedar_site, 101)
             self.assertIn("立即生效", send.call_args.args[3])
+
+    def test_reference_admin_can_still_bind_non_cedar_site(self):
+        temporary_state = {"admins": {"77": {}}}
+        group = SimpleNamespace(chat_type=bot.ChatType.GROUP, self_in_group=True)
+        fake_bot = SimpleNamespace(rpc=SimpleNamespace(get_full_chat_by_id=lambda _accid, _chat_id: group))
+        with patch.object(bot, "state", temporary_state), patch.object(bot, "bind_group_to_site", return_value=self.site) as bind_group, patch.object(bot, "send"):
+            handled = bot.handle_admin_command(fake_bot, 1, 900, 77, False, self.site, "管理员 绑定群 101")
+        self.assertTrue(handled)
+        bind_group.assert_called_once_with(self.site, 101)
 
     def test_admin_can_set_member_join_date_from_private_chat(self):
         temporary_state = {"admins": {"77": {}}, "member_join_dates": {}}
@@ -617,15 +695,35 @@ class MenxunBotTests(unittest.TestCase):
             self.assertIn("立即按新起点", send.call_args.args[3])
 
     def test_binding_group_updates_sites_file_and_memory_routes(self):
+        cedar_site = bot.SiteConfig(site_id="cedar-test", name="Cedar / 测试组", url="https://example.test/api/bot/groups/test", chat_ids=frozenset({101}))
         with tempfile.TemporaryDirectory() as folder:
             sites_file = bot.Path(folder) / "sites.json"
-            sites_file.write_text(json.dumps({"sites": [bot.site_config_row(self.site)]}, ensure_ascii=False), encoding="utf-8")
-            with patch.dict(os.environ, {"MENXUN_SITES_JSON": ""}), patch.object(bot, "SITES_FILE", sites_file), patch.object(bot, "SITES", (self.site,)), patch.object(bot, "SITE_BY_ID", {"test": self.site}), patch.object(bot, "SITE_BY_CHAT_ID", {}), patch.object(bot, "DEFAULT_SITE", self.site):
-                updated = bot.bind_group_to_site(self.site, 345)
+            sites_file.write_text(json.dumps({"sites": [bot.site_config_row(cedar_site)]}, ensure_ascii=False), encoding="utf-8")
+            with patch.dict(os.environ, {"MENXUN_SITES_JSON": ""}), patch.object(bot, "SITES_FILE", sites_file), patch.object(bot, "SITES", (cedar_site,)), patch.object(bot, "SITE_BY_ID", {"cedar-test": cedar_site}), patch.object(bot, "SITE_BY_CHAT_ID", {101: cedar_site}), patch.object(bot, "DEFAULT_SITE", cedar_site):
+                updated = bot.bind_group_to_site(cedar_site, 345)
                 self.assertIn(345, updated.chat_ids)
-                self.assertEqual(bot.SITE_BY_CHAT_ID[345].site_id, "test")
+                self.assertEqual(bot.SITE_BY_CHAT_ID[345].site_id, "cedar-test")
                 saved = json.loads(sites_file.read_text(encoding="utf-8"))
                 self.assertEqual(saved["sites"][0]["chat_ids"], [101, 345])
+                unbound = bot.unbind_group_from_site(updated, 345)
+                self.assertNotIn(345, unbound.chat_ids)
+                self.assertNotIn(345, bot.SITE_BY_CHAT_ID)
+
+    def test_unbind_group_on_single_file_bind_mount(self):
+        import errno
+        cedar_site = bot.SiteConfig(site_id="cedar-test", name="Cedar / 测试组", url="https://example.test/api/bot/groups/test", chat_ids=frozenset({101}))
+        with tempfile.TemporaryDirectory() as folder:
+            sites_file = bot.Path(folder) / "config.json"
+            sites_file.write_text(json.dumps({"sites": [bot.site_config_row(cedar_site)]}, ensure_ascii=False), encoding="utf-8")
+            real_replace = bot.Path.replace
+            def mounted_replace(path, target):
+                if target == sites_file:
+                    raise OSError(errno.EBUSY, "Resource busy")
+                return real_replace(path, target)
+            with patch.dict(os.environ, {"MENXUN_SITES_JSON": ""}), patch.object(bot, "SITES_FILE", sites_file), patch.object(bot, "SITES", (cedar_site,)), patch.object(bot, "SITE_BY_ID", {"cedar-test": cedar_site}), patch.object(bot, "SITE_BY_CHAT_ID", {101: cedar_site}), patch.object(bot, "DEFAULT_SITE", cedar_site), patch.object(bot.Path, "replace", mounted_replace):
+                bot.unbind_group_from_site(cedar_site, 101)
+                self.assertNotIn(101, bot.SITE_BY_CHAT_ID)
+                self.assertEqual(json.loads(sites_file.read_text(encoding="utf-8"))["sites"][0]["chat_ids"], [])
 
     def test_health_heartbeat_is_accepted_by_container_check(self):
         with tempfile.TemporaryDirectory() as folder:
