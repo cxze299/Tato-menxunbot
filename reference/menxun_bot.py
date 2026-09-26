@@ -735,13 +735,54 @@ def daily_devotion_text(site: SiteConfig, target_date: date | None = None) -> st
     _, config = website_snapshot(site)
     daily = ((config.get("task_sections") or {}).get("daily") or {})
     devotion = daily.get("devotion") or daily
-    source_path = devotion.get("path") or devotion.get("url") or daily.get("path") or daily.get("url")
-    title = str(devotion.get("title") or daily.get("label") or "每日灵修").strip()
+    cedar = is_cedar_site(site)
+    plan = None
+    if cedar and devotion.get("enabled") is False:
+        raise RuntimeError(f"{site.name} 今日灵修已停用，未发送通知。")
+    if cedar and str(devotion.get("plan_mode") or "").lower() == "custom":
+        plan = next((item for item in devotion.get("plans") or []
+                     if isinstance(item, dict) and str(item.get("date")) == target_date.isoformat()), None)
+        if plan is None:
+            raise RuntimeError(f"{site.name} {target_date.isoformat()} 没有灵修计划，未发送通知。")
+    plan = plan or {}
+    source_path = (plan.get("path") or devotion.get("custom_path") or devotion.get("path")
+                   or devotion.get("url") or daily.get("path") or daily.get("url"))
+    title = str(plan.get("title") or devotion.get("title") or daily.get("label") or "每日灵修").strip()
     if not source_path:
+        if cedar:
+            raise RuntimeError(f"{site.name} 未配置灵修资源，未发送通知。")
         return f"📖 {site.name} · {target_date.isoformat()}\n该网站暂未配置可读取的灵修内容。"
+    if cedar and (str(plan.get("type") or devotion.get("type") or "").lower() == "pdf"
+                  or str(source_path).lower().endswith(".pdf")):
+        start = str(plan.get("page_start") or "").strip()
+        end = str(plan.get("page_end") or start).strip()
+        if not start and str(devotion.get("start_page") or "").isdigit():
+            try:
+                offset = (target_date - date.fromisoformat(str(devotion.get("numbered_start_date")))).days
+                start = str(int(devotion["start_page"]) + offset)
+                end = start
+            except (TypeError, ValueError):
+                pass
+        pages = f"{start}-{end}" if start.isdigit() and end.isdigit() else ""
+        site_root = site.url.split("/api/bot/groups/", 1)[0]
+        asset = re.fullmatch(r"/api/assets/(\d+)/download", str(source_path).strip())
+        if pages and asset:
+            reader_source = f"/api/assets/{asset.group(1)}/range?pages={pages}"
+            link = (f"{site_root}/?reader_source={quote(reader_source, safe='')}"
+                    f"&reader_title={quote(title, safe='')}&reader_pages={quote(pages, safe='')}")
+        else:
+            link = site_root
+        page_label = f"第 {start}–{end} 页" if pages else "今日安排的页码"
+        return f"📖 {site.name} · {target_date.isoformat()}\n{title}\n\n阅读 PDF {page_label}：\n{link}\n（登录 Cedar 网站后可打开）"
     markdown = fetch_text(site, str(source_path))
-    content = extract_devotion_section(markdown, devotion, target_date)
+    section_config = {**devotion, "path": source_path}
+    if cedar and str(plan.get("section") or "").isdigit():
+        section_config.update({"mode": "numbered", "numbered_start_date": target_date.isoformat(),
+                               "numbered_start": int(plan["section"])})
+    content = extract_devotion_section(markdown, section_config, target_date)
     if not content:
+        if cedar:
+            raise RuntimeError(f"{site.name} {target_date.isoformat()} 灵修资源中没有找到当天内容，未发送通知。")
         return f"📖 {site.name} · {target_date.isoformat()}\n没有找到当天的灵修内容。"
     return f"📖 {site.name} · {target_date.isoformat()}\n{title}\n\n{content}"
 

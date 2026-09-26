@@ -504,6 +504,34 @@ class MenxunBotTests(unittest.TestCase):
         self.assertIn("旷野的筵席", text)
         self.assertIn("这是当天内容", text)
 
+    def test_cedar_markdown_devotion_uses_bot_asset_and_date_section(self):
+        site = bot.SiteConfig("cedar-zk", "Cedar / 科大门训", "https://example.test/api/bot/groups/zk", frozenset())
+        self.assertEqual(bot.site_request_url(site, "/api/assets/263/download"), "https://example.test/api/bot/groups/zk/assets/263/download")
+        config = {"task_sections": {"daily": {"devotion": {"path": "/api/assets/263/download", "type": "markdown"}}}}
+        markdown = "九月二十五日\n昨天内容\n\n九月二十六日\n今天的灵修内容\n\n九月二十七日\n明天内容"
+        with patch.object(bot, "website_snapshot", return_value=({}, config)), patch.object(bot, "fetch_text", return_value=markdown) as fetch:
+            text = bot.daily_devotion_text(site, date(2026, 9, 26))
+        fetch.assert_called_once_with(site, "/api/assets/263/download")
+        self.assertIn("今天的灵修内容", text)
+        self.assertNotIn("昨天内容", text)
+
+    def test_cedar_pdf_plan_sends_reader_link_and_pages(self):
+        site = bot.SiteConfig("cedar-spiritual", "Cedar / 灵命组", "https://example.test/api/bot/groups/spiritual", frozenset())
+        config = {"task_sections": {"daily": {"devotion": {"path": "/api/assets/473/download", "type": "pdf", "plan_mode": "custom", "plans": [{"date": "2026-09-26", "title": "今日灵修", "page_start": "36", "page_end": "37"}]}}}}
+        with patch.object(bot, "website_snapshot", return_value=({}, config)), patch.object(bot, "fetch_text") as fetch:
+            text = bot.daily_devotion_text(site, date(2026, 9, 26))
+        fetch.assert_not_called()
+        self.assertIn("第 36–37 页", text)
+        self.assertIn("reader_source=%2Fapi%2Fassets%2F473%2Frange%3Fpages%3D36-37", text)
+
+    def test_cedar_missing_plan_does_not_mark_as_sent(self):
+        site = bot.SiteConfig("cedar-spiritual", "Cedar / 灵命组", "https://example.test/api/bot/groups/spiritual", frozenset({101}))
+        config = {"task_sections": {"daily": {"devotion": {"path": "/api/assets/473/download", "type": "pdf", "plan_mode": "custom", "plans": []}}}}
+        with patch.object(bot, "website_snapshot", return_value=({}, config)), patch.object(bot, "send") as send:
+            with self.assertRaisesRegex(RuntimeError, "没有灵修计划"):
+                bot.publish_daily_devotion(SimpleNamespace(), 1, site)
+        send.assert_not_called()
+
     def test_daily_devotion_highlights_quoted_scripture(self):
         lines = ["「你们要常在我里面，我也常在你们里面。」", "解释内容。", "**「已经加粗的经文」**", "“另一处经文”"]
         text = bot.clean_devotion_markdown(lines)
