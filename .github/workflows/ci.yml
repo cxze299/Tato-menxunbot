@@ -1,0 +1,32 @@
+name: Bot checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r reference/requirements.txt
+      - name: Reference business tests
+        working-directory: reference
+        run: python -m unittest test_menxun_bot
+      - name: Potato adapter and reading tests
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('config.json').write_text(json.dumps({'bot_token': 'test-token', 'sites': [{'id': 'test', 'name': '测试组', 'url': 'https://example.test', 'chat_ids': []}]}), encoding='utf-8')
+          PY
+          python -m unittest test_group_binding_flow test_reading_status
+      - name: Build production image
+        run: docker build -t potato-menxun-bot:ci .
